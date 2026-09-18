@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cuda.h>
+#include <thrust/copy.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
 #include <thrust/partition.h>
@@ -91,14 +92,21 @@ static glm::vec3 *dev_image = NULL;
 static Geom *dev_geoms = NULL;
 static Material *dev_materials = NULL;
 static PathSegment *dev_paths = NULL;
+static PathSegment *dev_paths_tmp = NULL;
+static PathSegment *dev_paths_tmp2 = NULL;
 static ShadeableIntersection *dev_intersections = NULL;
+static ShadeableIntersection *dev_intersections_tmp = NULL;
 static int *dev_firstThreadIdx = NULL;
 static uint8_t *dev_segment_matidx = NULL;
 static uint8_t *dev_intersection_matidx = NULL;
 static thrust::device_ptr<uint8_t> dev_thrust_segment_matidx = NULL;
 static thrust::device_ptr<uint8_t> dev_thrust_intersection_matidx = NULL;
 static thrust::device_ptr<PathSegment> dev_thrust_paths = NULL;
+static thrust::device_ptr<PathSegment> dev_thrust_paths_tmp = NULL;
+static thrust::device_ptr<PathSegment> dev_thrust_paths_tmp2 = NULL;
 static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections =
+    NULL;
+static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections_tmp =
     NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
@@ -115,6 +123,8 @@ void pathtraceInit(Scene *scene) {
   cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
 
   cudaMalloc(&dev_paths, pixelcount * sizeof(PathSegment));
+  cudaMalloc(&dev_paths_tmp, pixelcount * sizeof(PathSegment));
+  cudaMalloc(&dev_paths_tmp2, pixelcount * sizeof(PathSegment));
 
   cudaMalloc(&dev_geoms, scene->geoms.size() * sizeof(Geom));
   cudaMemcpy(dev_geoms, scene->geoms.data(), scene->geoms.size() * sizeof(Geom),
@@ -127,6 +137,8 @@ void pathtraceInit(Scene *scene) {
 
   cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
   cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
+  cudaMalloc(&dev_intersections_tmp, pixelcount * sizeof(ShadeableIntersection));
+  cudaMemset(dev_intersections_tmp, 0, pixelcount * sizeof(ShadeableIntersection));
 
 
   cudaMalloc(&dev_firstThreadIdx, sizeof(int) * 1);
@@ -137,7 +149,11 @@ void pathtraceInit(Scene *scene) {
   dev_thrust_intersection_matidx =
       thrust::device_pointer_cast(dev_intersection_matidx);
   dev_thrust_paths = thrust::device_pointer_cast(dev_paths);
+  dev_thrust_paths_tmp = thrust::device_pointer_cast(dev_paths_tmp);
+  dev_thrust_paths_tmp2 = thrust::device_pointer_cast(dev_paths_tmp2);
   dev_thrust_intersections = thrust::device_pointer_cast(dev_intersections);
+  dev_thrust_intersections_tmp =
+      thrust::device_pointer_cast(dev_intersections_tmp);
 
   // TODO: initialize any extra device memeory you need
 
@@ -147,9 +163,12 @@ void pathtraceInit(Scene *scene) {
 void pathtraceFree() {
   cudaFree(dev_image); // no-op if dev_image is null
   cudaFree(dev_paths);
+  cudaFree(dev_paths_tmp);
+  cudaFree(dev_paths_tmp2);
   cudaFree(dev_geoms);
   cudaFree(dev_materials);
   cudaFree(dev_intersections);
+  cudaFree(dev_intersections_tmp);
   cudaFree(dev_firstThreadIdx);
   cudaFree(dev_segment_matidx);
   cudaFree(dev_intersection_matidx);
@@ -205,7 +224,8 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
 __global__ void computeIntersections(int depth, int num_paths,
                                      PathSegment *pathSegments, Geom *geoms,
                                      int geoms_size,
-                                     ShadeableIntersection *intersections) {
+                                     ShadeableIntersection *intersections,
+                                     PathSegment *orderedPathSegments) {
   int path_index = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (path_index < num_paths) {
@@ -250,6 +270,9 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].t = -1.0f;
         pathSegment.color = glm::vec3(0);
         pathSegment.remainingBounces = 0;
+        if (orderedPathSegments != NULL) {
+          orderedPathSegments[pathSegment.pixelIndex] = pathSegment;
+        }
       } else {
         // The ray hits something
         intersections[path_index].t = t_min;
@@ -263,7 +286,8 @@ __global__ void computeIntersections(int depth, int num_paths,
 __global__ void computeRayColors(int iter, int num_paths,
                                  ShadeableIntersection *shadeableIntersections,
                                  PathSegment *pathSegments,
-                                 Material *materials) {
+                                 Material *materials,
+                                 PathSegment *orderedPathSegments) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_paths) {
       ShadeableIntersection intersection = shadeableIntersections[idx];
@@ -289,6 +313,9 @@ __global__ void computeRayColors(int iter, int num_paths,
 
 
             segment->remainingBounces--;
+            if (orderedPathSegments != NULL) {
+              orderedPathSegments[segment->pixelIndex] = *segment;
+            }
         }
       }
   }
@@ -443,31 +470,53 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
 
   int iteration_num = 0;
   int n = num_paths;
+  PathSegment *dev_active_paths = dev_paths;
+  PathSegment *dev_active_paths_tmp = dev_paths_tmp;
+  thrust::device_ptr<PathSegment> dev_thrust_active_paths = dev_thrust_paths;
+  thrust::device_ptr<PathSegment> dev_thrust_active_paths_tmp =
+      dev_thrust_paths_tmp;
+
+  if (!SORT_BY_MATERIAL) {
+    thrust::copy(dev_thrust_paths, dev_thrust_paths + num_paths,
+                 dev_thrust_paths_tmp);
+    dev_active_paths = dev_paths_tmp;
+    dev_active_paths_tmp = dev_paths_tmp2;
+    dev_thrust_active_paths = dev_thrust_paths_tmp;
+    dev_thrust_active_paths_tmp = dev_thrust_paths_tmp2;
+  }
+
+  ShadeableIntersection *dev_active_intersections = dev_intersections;
+  ShadeableIntersection *dev_active_intersections_tmp = dev_intersections_tmp;
+  thrust::device_ptr<ShadeableIntersection> dev_thrust_active_intersections =
+      dev_thrust_intersections;
+  thrust::device_ptr<ShadeableIntersection> dev_thrust_active_intersections_tmp =
+      dev_thrust_intersections_tmp;
+
   while (iteration_num <= traceDepth) {
     // clean shading chunks
-    cudaMemset(dev_intersections, 0,
+    cudaMemset(dev_active_intersections, 0,
                pixelcount * sizeof(ShadeableIntersection));
 
     // tracing
     dim3 numblocksPathSegmentTracing =
         (n + blockSize1d - 1) / blockSize1d;
     computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>>(
-        depth, num_paths, dev_paths, dev_geoms, hst_scene->geoms.size(),
-        dev_intersections);
+        depth, n, dev_active_paths, dev_geoms, hst_scene->geoms.size(),
+        dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths);
     checkCUDAError("trace one bounce");
     // cudaDeviceSynchronize();
     depth++;
 
     if (SORT_BY_MATERIAL) {
       mapToMatIdx<<<numblocksPathSegmentTracing, blockSize1d>>>(
-          n, dev_paths, dev_intersections, dev_segment_matidx,
+          n, dev_active_paths, dev_active_intersections, dev_segment_matidx,
           dev_intersection_matidx);
       thrust::stable_sort_by_key(dev_thrust_segment_matidx,
                                  dev_thrust_segment_matidx + n,
-                                 dev_thrust_paths);
+                                 dev_thrust_active_paths);
       thrust::stable_sort_by_key(dev_thrust_intersection_matidx,
                                  dev_thrust_intersection_matidx + n,
-                                 dev_thrust_intersections);
+                                 dev_thrust_active_intersections);
       int firstThreadIdx = n;
       cudaMemcpy(dev_firstThreadIdx, &firstThreadIdx, sizeof(int),
                  cudaMemcpyHostToDevice);
@@ -480,15 +529,36 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
           break;
       }
     } else {
-      auto activeEnd =
-          thrust::stable_partition(dev_thrust_intersections,
-                                   dev_thrust_intersections + n,
-                                   dev_thrust_paths, IsActivePath());
-      thrust::stable_partition(dev_thrust_paths, dev_thrust_paths + n,
-                               IsActivePath());
-      n = activeEnd - dev_thrust_intersections;
+      auto activePathsEnd =
+          thrust::copy_if(dev_thrust_active_paths, dev_thrust_active_paths + n,
+                          dev_thrust_active_paths, dev_thrust_active_paths_tmp,
+                          IsActivePath());
+      thrust::copy_if(dev_thrust_active_intersections,
+                      dev_thrust_active_intersections + n,
+                      dev_thrust_active_paths,
+                      dev_thrust_active_intersections_tmp,
+                      IsActivePath());
+
+      n = activePathsEnd - dev_thrust_active_paths_tmp;
+
+      PathSegment *tmp_paths = dev_active_paths;
+      dev_active_paths = dev_active_paths_tmp;
+      dev_active_paths_tmp = tmp_paths;
+      
+      ShadeableIntersection *tmp_intersections = dev_active_intersections;
+      dev_active_intersections = dev_active_intersections_tmp;
+      dev_active_intersections_tmp = tmp_intersections;
+      
+      dev_thrust_active_paths = thrust::device_pointer_cast(dev_active_paths);
+      dev_thrust_active_paths_tmp =
+          thrust::device_pointer_cast(dev_active_paths_tmp);
+      dev_thrust_active_intersections =
+          thrust::device_pointer_cast(dev_active_intersections);
+      dev_thrust_active_intersections_tmp =
+          thrust::device_pointer_cast(dev_active_intersections_tmp);
+      
       if (n == 0) {
-          break;
+        break;
       }
     }
 
@@ -496,7 +566,8 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         (n + blockSize1d - 1) / blockSize1d;
 
     computeRayColors<<<numblocksPathSegmentTracing, blockSize1d>>>(
-        iter, n, dev_intersections, dev_paths, dev_materials);
+        iter, n, dev_active_intersections, dev_active_paths, dev_materials,
+        SORT_BY_MATERIAL ? NULL : dev_paths);
 
     if (guiData != NULL) {
       guiData->TracedDepth = depth;
