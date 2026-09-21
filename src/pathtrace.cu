@@ -229,7 +229,8 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
 // Feel free to modify the code below.
 __global__ void computeIntersections(int depth, int num_paths,
                                      PathSegment *pathSegments, Geom *geoms,
-                                     int geoms_size,
+                                     int geoms_size, Triangle *triangles,
+                                     int triangles_size,
                                      ShadeableIntersection *intersections,
                                      PathSegment *orderedPathSegments) {
   int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -243,6 +244,7 @@ __global__ void computeIntersections(int depth, int num_paths,
       glm::vec3 normal;
       float t_min = FLT_MAX;
       int hit_geom_index = -1;
+      int hit_material_id = -1;
       bool outside = true;
 
       glm::vec3 tmp_intersect;
@@ -267,12 +269,27 @@ __global__ void computeIntersections(int depth, int num_paths,
         if (t > 0.0f && t_min > t) {
           t_min = t;
           hit_geom_index = i;
+          hit_material_id = geom.materialid;
           intersect_point = tmp_intersect;
           normal = tmp_normal;
         }
       }
 
-      if (hit_geom_index == -1) {
+      for (int i = 0; i < triangles_size; i++) {
+        Triangle &triangle = triangles[i];
+        t = triangleIntersectionTest(triangle, pathSegment.ray, tmp_intersect,
+                                     tmp_normal, outside);
+
+        if (t > 0.0f && t_min > t) {
+          t_min = t;
+          hit_geom_index = -1;
+          hit_material_id = triangle.materialid;
+          intersect_point = tmp_intersect;
+          normal = tmp_normal;
+        }
+      }
+
+      if (hit_material_id == -1) {
         intersections[path_index].t = -1.0f;
         intersections[path_index].geomId = -1;
         pathSegment.color = glm::vec3(0);
@@ -283,7 +300,7 @@ __global__ void computeIntersections(int depth, int num_paths,
       } else {
         // The ray hits something
         intersections[path_index].t = t_min;
-        intersections[path_index].materialId = geoms[hit_geom_index].materialid;
+        intersections[path_index].materialId = hit_material_id;
         intersections[path_index].geomId = hit_geom_index;
         intersections[path_index].surfaceNormal = normal;
       }
@@ -313,27 +330,28 @@ __global__ void computeRayColors(int iter, int num_paths,
             thrust::uniform_real_distribution<float> u01(0, 1);
             if (material.alpha < 1.0f && u01(rng) > material.alpha) {
                 glm::vec3 rayDir = glm::normalize(segment->ray.direction);
-                Geom geom = geoms[intersection.geomId];
-                Ray exitRay;
-                exitRay.origin = intersect_point + 0.0002f * rayDir;
-                exitRay.direction = segment->ray.direction;
+                segment->ray.origin = intersect_point + 0.0002f * rayDir;
+                if (intersection.geomId >= 0) {
+                  Geom geom = geoms[intersection.geomId];
+                  Ray exitRay;
+                  exitRay.origin = segment->ray.origin;
+                  exitRay.direction = segment->ray.direction;
 
-                float exitT = -1.0f;
-                glm::vec3 exitPoint;
-                glm::vec3 exitNormal;
-                bool exitOutside = false;
-                if (geom.type == CUBE) {
-                  exitT = boxIntersectionTest(geom, exitRay, exitPoint,
-                                              exitNormal, exitOutside);
-                } else if (geom.type == SPHERE) {
-                  exitT = sphereIntersectionTest(geom, exitRay, exitPoint,
-                                                 exitNormal, exitOutside);
-                }
+                  float exitT = -1.0f;
+                  glm::vec3 exitPoint;
+                  glm::vec3 exitNormal;
+                  bool exitOutside = false;
+                  if (geom.type == CUBE) {
+                    exitT = boxIntersectionTest(geom, exitRay, exitPoint,
+                                                exitNormal, exitOutside);
+                  } else if (geom.type == SPHERE) {
+                    exitT = sphereIntersectionTest(geom, exitRay, exitPoint,
+                                                   exitNormal, exitOutside);
+                  }
 
-                if (exitT > 0.0f) {
-                  segment->ray.origin = exitPoint + 0.0002f * rayDir;
-                } else {
-                  segment->ray.origin = intersect_point + 0.0002f * rayDir;
+                  if (exitT > 0.0f) {
+                    segment->ray.origin = exitPoint + 0.0002f * rayDir;
+                  }
                 }
                 segment->remainingBounces--;
                 if (orderedPathSegments != NULL) {
@@ -491,6 +509,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         (n + blockSize1d - 1) / blockSize1d;
     computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>>(
         depth, n, dev_active_paths, dev_geoms, hst_scene->geoms.size(),
+        dev_triangles, hst_scene->triangles.size(),
         dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths);
     checkCUDAError("trace one bounce");
     // cudaDeviceSynchronize();

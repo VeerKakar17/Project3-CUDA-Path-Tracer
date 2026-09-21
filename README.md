@@ -14,4 +14,6 @@ project, and we will not be able to grade you without a good README.
 
 - Added ideal diffuse with actual path tracing
 - added anti aliasing
-
+- added stream comopaction + material based optimization
+- Added reflective and alpha materials
+- added gltf loading
