@@ -4,6 +4,7 @@
 
 #include "glm/glm.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,18 +34,34 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
+struct Triangle {
+    glm::vec3 v0, v1, v2;
+    glm::vec3 n0, n1, n2;
+    int materialid;
+};
+
 struct Material
 {
     glm::vec3 color;
+    float alpha;
+
+    uint8_t is_metalic;
+    float metalic_factor;
+    float roughness_factor;
+
     struct
     {
         float exponent;
         glm::vec3 color;
     } specular;
-    float hasReflective;
-    float hasRefractive;
+
+    uint8_t is_emissive;
+    glm::vec3 emissive_factor; // Emission color
+
+    uint8_t double_sided; // For if we cull back faces
+
+    uint8_t hasRefractive;
     float indexOfRefraction;
-    float emittance;
 };
 
 struct Camera
@@ -84,4 +101,5 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   int materialId;
+  int geomId;
 };

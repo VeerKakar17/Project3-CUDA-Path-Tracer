@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(cis565_path_tracer LANGUAGES CUDA CXX)
+project(cis565_path_tracer LANGUAGES CUDA CXX C)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -68,6 +68,7 @@ set(sources
     src/intersections.cu
     src/interactions.cu
     src/scene.cpp
+    src/tinygltf/tiny_gltf_v3.c
     src/utilities.cpp
 )
 
