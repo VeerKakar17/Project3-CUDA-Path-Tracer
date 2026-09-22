@@ -83,3 +83,20 @@ __host__ __device__ float triangleIntersectionTest(
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
     bool& outside);
+
+__host__ __device__ float triangleIntersectionTest(
+    Triangle triangle,
+    Ray r,
+    glm::vec3& intersectionPoint,
+    glm::vec3& normal,
+    bool& outside,
+    glm::vec2& uv);
+
+__host__ __device__ float triangleIntersectionTest(
+    Triangle triangle,
+    Ray r,
+    glm::vec3& intersectionPoint,
+    glm::vec3& normal,
+    bool& outside,
+    glm::vec2& uv,
+    glm::vec3& tangent);

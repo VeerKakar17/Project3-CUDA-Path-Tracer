@@ -119,6 +119,33 @@ __host__ __device__ float triangleIntersectionTest(
     glm::vec3 &normal,
     bool &outside)
 {
+    glm::vec2 uv;
+    return triangleIntersectionTest(triangle, r, intersectionPoint, normal,
+                                    outside, uv);
+}
+
+__host__ __device__ float triangleIntersectionTest(
+    Triangle triangle,
+    Ray r,
+    glm::vec3 &intersectionPoint,
+    glm::vec3 &normal,
+    bool &outside,
+    glm::vec2 &uv)
+{
+    glm::vec3 tangent;
+    return triangleIntersectionTest(triangle, r, intersectionPoint, normal,
+                                    outside, uv, tangent);
+}
+
+__host__ __device__ float triangleIntersectionTest(
+    Triangle triangle,
+    Ray r,
+    glm::vec3 &intersectionPoint,
+    glm::vec3 &normal,
+    bool &outside,
+    glm::vec2 &uv,
+    glm::vec3 &tangent)
+{
     const float epsilon = 0.000001f;
     glm::vec3 direction = glm::normalize(r.direction);
     glm::vec3 edge1 = triangle.v1 - triangle.v0;
@@ -158,12 +185,18 @@ __host__ __device__ float triangleIntersectionTest(
     intersectionPoint = getPointOnRay(normalizedRay, t);
 
     float w = 1.0f - u - v;
+    uv = w * triangle.uv0 + u * triangle.uv1 + v * triangle.uv2;
     normal = w * triangle.n0 + u * triangle.n1 + v * triangle.n2;
+    tangent = w * triangle.t0 + u * triangle.t1 + v * triangle.t2;
     if (glm::dot(normal, normal) <= epsilon)
     {
         normal = glm::cross(edge1, edge2);
     }
     normal = glm::normalize(normal);
+    if (glm::dot(tangent, tangent) > epsilon)
+    {
+        tangent = glm::normalize(tangent - normal * glm::dot(normal, tangent));
+    }
 
     outside = glm::dot(normal, direction) < 0.0f;
     if (!outside)

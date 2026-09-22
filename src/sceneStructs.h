@@ -37,6 +37,7 @@ struct Geom
 struct Triangle {
     glm::vec3 v0, v1, v2;
     glm::vec3 n0, n1, n2;
+    glm::vec3 t0, t1, t2;
     glm::vec2 uv0, uv1, uv2;
     glm::vec3 centroid;
     int materialid;
@@ -64,6 +65,28 @@ struct Material
 
     uint8_t hasRefractive;
     float indexOfRefraction;
+
+    int baseColorTexId;
+    int metallicRoughnessTexId;
+    int emissiveTexId;
+    int normalTexId;
+
+    Material() : emissiveTexId(-1), normalTexId(-1), baseColorTexId(-1), metallicRoughnessTexId(-1),
+        hasRefractive(0), is_emissive(0), is_metalic(0) {}
+};
+
+struct Texture {
+    int width;
+    int height;
+    int channels;
+    std::vector<uchar4> pixels;
+};
+
+struct DeviceTexture {
+    int width;
+    int height;
+    int channels;
+    uchar4 *pixels;
 };
 
 struct Camera
@@ -102,6 +125,8 @@ struct ShadeableIntersection
 {
   float t;
   glm::vec3 surfaceNormal;
+  glm::vec3 surfaceTangent;
   int materialId;
   int geomId;
+  glm::vec2 uv;
 };

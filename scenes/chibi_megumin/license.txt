@@ -1,0 +1,11 @@
+Model Information:
+* title:	Chibi Megumin
+* source:	https://sketchfab.com/3d-models/chibi-megumin-03c804f7661c45cfbb50bff2ae95707d
+* author:	JCatt (https://sketchfab.com/officialjcatt)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Chibi Megumin" (https://sketchfab.com/3d-models/chibi-megumin-03c804f7661c45cfbb50bff2ae95707d) by JCatt (https://sketchfab.com/officialjcatt) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

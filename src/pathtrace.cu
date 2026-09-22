@@ -93,6 +93,7 @@ static glm::vec3 *dev_image = NULL;
 static Geom *dev_geoms = NULL;
 static Triangle *dev_triangles = NULL;
 static Material *dev_materials = NULL;
+static DeviceTexture *dev_textures = NULL;
 static BVHNode *dev_bvh = NULL;
 static PathSegment *dev_paths = NULL;
 static PathSegment *dev_paths_tmp = NULL;
@@ -111,6 +112,7 @@ static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections =
     NULL;
 static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections_tmp =
     NULL;
+static std::vector<DeviceTexture> hst_device_textures;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
@@ -141,6 +143,32 @@ void pathtraceInit(Scene *scene) {
   cudaMemcpy(dev_materials, scene->materials.data(),
              scene->materials.size() * sizeof(Material),
              cudaMemcpyHostToDevice);
+
+  hst_device_textures.clear();
+  hst_device_textures.resize(scene->textures.size());
+  for (size_t i = 0; i < scene->textures.size(); ++i) {
+    const Texture &texture = scene->textures[i];
+    DeviceTexture deviceTexture{};
+    deviceTexture.width = texture.width;
+    deviceTexture.height = texture.height;
+    deviceTexture.channels = texture.channels;
+    if (!texture.pixels.empty()) {
+      cudaMalloc(&deviceTexture.pixels,
+                 texture.pixels.size() * sizeof(uchar4));
+      cudaMemcpy(deviceTexture.pixels, texture.pixels.data(),
+                 texture.pixels.size() * sizeof(uchar4),
+                 cudaMemcpyHostToDevice);
+    }
+    hst_device_textures[i] = deviceTexture;
+  }
+
+  if (!hst_device_textures.empty()) {
+    cudaMalloc(&dev_textures,
+               hst_device_textures.size() * sizeof(DeviceTexture));
+    cudaMemcpy(dev_textures, hst_device_textures.data(),
+               hst_device_textures.size() * sizeof(DeviceTexture),
+               cudaMemcpyHostToDevice);
+  }
 
   cudaMalloc(&dev_bvh, scene->bvh.nodes.size() * sizeof(BVHNode));
   cudaMemcpy(dev_bvh, scene->bvh.nodes.data(), scene->bvh.nodes.size() * sizeof(BVHNode), cudaMemcpyHostToDevice);
@@ -179,6 +207,12 @@ void pathtraceFree() {
   cudaFree(dev_triangles);
   cudaFree(dev_bvh);
   cudaFree(dev_materials);
+  for (DeviceTexture &texture : hst_device_textures) {
+    cudaFree(texture.pixels);
+  }
+  hst_device_textures.clear();
+  cudaFree(dev_textures);
+  dev_textures = NULL;
   cudaFree(dev_intersections);
   cudaFree(dev_intersections_tmp);
   cudaFree(dev_firstThreadIdx);
@@ -263,7 +297,8 @@ __device__ float IntersectAABB(const Ray &ray, const BVHNode &node,
 __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
                              int triangles_size, BVHNode *bvh, float &tMin,
                              glm::vec3 &intersectPoint, glm::vec3 &normal,
-                             int &materialId) {
+                             int &materialId, glm::vec2 &uv,
+                             glm::vec3 &tangent) {
   bool hit = false;
   int nodeIdx = 0;
   constexpr int STACK_SIZE = 128;
@@ -282,15 +317,20 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
 
         glm::vec3 tmpIntersect;
         glm::vec3 tmpNormal;
+        glm::vec2 tmpUv;
+        glm::vec3 tmpTangent;
         bool outside = true;
         float t = triangleIntersectionTest(triangles[triangleIdx], ray,
-                                           tmpIntersect, tmpNormal, outside);
+                                           tmpIntersect, tmpNormal, outside,
+                                           tmpUv, tmpTangent);
         if (t > 0.0f && t < tMin) {
           hit = true;
           tMin = t;
           intersectPoint = tmpIntersect;
           normal = tmpNormal;
           materialId = triangles[triangleIdx].materialid;
+          uv = tmpUv;
+          tangent = tmpTangent;
         }
       }
 
@@ -354,6 +394,10 @@ __global__ void computeIntersections(int depth, int num_paths,
 
       glm::vec3 tmp_intersect;
       glm::vec3 tmp_normal;
+      glm::vec3 hit_tangent(0.0f);
+      glm::vec3 tmp_tangent(0.0f);
+      glm::vec2 hit_uv(0.0f);
+      glm::vec2 tmp_uv(0.0f);
 
       // naive parse through global geoms
 
@@ -377,19 +421,25 @@ __global__ void computeIntersections(int depth, int num_paths,
           hit_material_id = geom.materialid;
           intersect_point = tmp_intersect;
           normal = tmp_normal;
+          hit_tangent = glm::vec3(0.0f);
         }
       }
 
       if (BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
-                       tmp_intersect, tmp_normal, hit_material_id)) {
+                       tmp_intersect, tmp_normal, hit_material_id, tmp_uv,
+                       tmp_tangent)) {
         hit_geom_index = -1;
         intersect_point = tmp_intersect;
         normal = tmp_normal;
+        hit_uv = tmp_uv;
+        hit_tangent = tmp_tangent;
       }
 
       if (hit_material_id == -1) {
         intersections[path_index].t = -1.0f;
         intersections[path_index].geomId = -1;
+        intersections[path_index].uv = glm::vec2(0.0f);
+        intersections[path_index].surfaceTangent = glm::vec3(0.0f);
         pathSegment.color = glm::vec3(0);
         pathSegment.remainingBounces = 0;
         if (orderedPathSegments != NULL) {
@@ -401,9 +451,87 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].materialId = hit_material_id;
         intersections[path_index].geomId = hit_geom_index;
         intersections[path_index].surfaceNormal = normal;
+        intersections[path_index].surfaceTangent = hit_tangent;
+        intersections[path_index].uv = hit_uv;
       }
     }
   }
+}
+
+__device__ float saturateFloat(float value) {
+  return fminf(fmaxf(value, 0.0f), 1.0f);
+}
+
+__device__ glm::vec4 sample_texture(DeviceTexture *textures, int textures_size,
+                                    int textureId, const glm::vec2 &uv) {
+  if (textures == NULL || textureId < 0 || textureId >= textures_size) {
+    return glm::vec4(1.0f);
+  }
+
+  DeviceTexture texture = textures[textureId];
+  if (texture.pixels == NULL || texture.width <= 0 || texture.height <= 0) {
+    return glm::vec4(1.0f);
+  }
+
+  float u = uv.x - floorf(uv.x);
+  float v = uv.y - floorf(uv.y);
+  float x = u * (float)(texture.width - 1);
+  float y = v * (float)(texture.height - 1);
+
+  int x0 = (int)floorf(x);
+  int y0 = (int)floorf(y);
+  int x1 = min(x0 + 1, texture.width - 1);
+  int y1 = min(y0 + 1, texture.height - 1);
+  float tx = x - (float)x0;
+  float ty = y - (float)y0;
+
+  uchar4 c00 = texture.pixels[y0 * texture.width + x0];
+  uchar4 c10 = texture.pixels[y0 * texture.width + x1];
+  uchar4 c01 = texture.pixels[y1 * texture.width + x0];
+  uchar4 c11 = texture.pixels[y1 * texture.width + x1];
+
+  glm::vec4 p00(c00.x, c00.y, c00.z, c00.w);
+  glm::vec4 p10(c10.x, c10.y, c10.z, c10.w);
+  glm::vec4 p01(c01.x, c01.y, c01.z, c01.w);
+  glm::vec4 p11(c11.x, c11.y, c11.z, c11.w);
+
+  glm::vec4 top = glm::mix(p00, p10, tx);
+  glm::vec4 bottom = glm::mix(p01, p11, tx);
+  return glm::mix(top, bottom, ty) / 255.0f;
+}
+
+__device__ glm::vec3 tangentFromNormal(glm::vec3 normal) {
+  glm::vec3 helper = fabsf(normal.x) < SQRT_OF_ONE_THIRD
+                         ? glm::vec3(1.0f, 0.0f, 0.0f)
+                         : glm::vec3(0.0f, 1.0f, 0.0f);
+  return glm::normalize(glm::cross(helper, normal));
+}
+
+__device__ glm::vec3 apply_normal_texture(DeviceTexture *textures,
+                                          int textures_size,
+                                          const Material &material,
+                                          const ShadeableIntersection &hit) {
+  glm::vec3 normal = glm::normalize(hit.surfaceNormal);
+  if (material.normalTexId < 0) {
+    return normal;
+  }
+
+  glm::vec3 tangent = hit.surfaceTangent;
+  if (glm::dot(tangent, tangent) <= 0.000001f) {
+    tangent = tangentFromNormal(normal);
+  } else {
+    tangent = glm::normalize(tangent - normal * glm::dot(normal, tangent));
+  }
+
+  glm::vec3 bitangent = glm::normalize(glm::cross(normal, tangent));
+  glm::vec3 sampled =
+      glm::vec3(sample_texture(textures, textures_size, material.normalTexId,
+                               hit.uv)) *
+          2.0f -
+      glm::vec3(1.0f);
+
+  return glm::normalize(sampled.x * tangent + sampled.y * bitangent +
+                        sampled.z * normal);
 }
 
 __global__ void computeRayColors(int iter, int num_paths,
@@ -411,6 +539,8 @@ __global__ void computeRayColors(int iter, int num_paths,
                                  PathSegment *pathSegments,
                                  Geom *geoms,
                                  Material *materials,
+                                 DeviceTexture *textures,
+                                 int textures_size,
                                  PathSegment *orderedPathSegments) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_paths) {
@@ -421,12 +551,49 @@ __global__ void computeRayColors(int iter, int num_paths,
             iter, segment->pixelIndex, segment->remainingBounces);
         Material material = materials[intersection.materialId];
         if (intersection.t > 0.0f) {
+            glm::vec4 baseColorSample =
+                sample_texture(textures, textures_size, material.baseColorTexId,
+                               intersection.uv);
+            glm::vec3 baseColor = material.color * glm::vec3(baseColorSample);
+            float alpha = material.alpha * baseColorSample.a;
+
+            float metallic = material.metalic_factor;
+            float roughness = material.roughness_factor;
+            if (material.metallicRoughnessTexId >= 0) {
+                glm::vec4 metallicRoughness = sample_texture(
+                    textures, textures_size, material.metallicRoughnessTexId,
+                    intersection.uv);
+                roughness = saturateFloat(roughness * metallicRoughness.g);
+                metallic = saturateFloat(metallic * metallicRoughness.b);
+            }
+
+            glm::vec3 emission = material.emissive_factor;
+            if (material.emissiveTexId >= 0) {
+                emission *= glm::vec3(sample_texture(
+                    textures, textures_size, material.emissiveTexId,
+                    intersection.uv));
+            }
+
+            Material sampledMaterial = material;
+            sampledMaterial.color = baseColor;
+            sampledMaterial.alpha = alpha;
+            sampledMaterial.metalic_factor = metallic;
+            sampledMaterial.roughness_factor = roughness;
+            sampledMaterial.is_metalic = metallic > 0.0f ? 1 : 0;
+            sampledMaterial.emissive_factor = emission;
+            sampledMaterial.is_emissive =
+                glm::dot(emission, emission) > 0.0f ? 1 : 0;
+
+            glm::vec3 surfaceNormal =
+                apply_normal_texture(textures, textures_size, sampledMaterial,
+                                     intersection);
 
             glm::vec3 old_dir = -segment->ray.direction;
             glm::vec3 intersect_point = getPointOnRay(segment->ray, intersection.t);
 
             thrust::uniform_real_distribution<float> u01(0, 1);
-            if (material.alpha < 1.0f && u01(rng) > material.alpha) {
+            if (sampledMaterial.alpha < 1.0f &&
+                u01(rng) > sampledMaterial.alpha) {
                 glm::vec3 rayDir = glm::normalize(segment->ray.direction);
                 segment->ray.origin = intersect_point + 0.0002f * rayDir;
                 if (intersection.geomId >= 0) {
@@ -458,17 +625,16 @@ __global__ void computeRayColors(int iter, int num_paths,
                 return;
             }
 
-            scatterRay(*segment, intersect_point, intersection.surfaceNormal, material,
-                    rng);
-            if (material.is_emissive) {
-                segment->color *= (material.color * material.emissive_factor);
+            scatterRay(*segment, intersect_point, surfaceNormal, sampledMaterial,
+                       rng);
+            if (sampledMaterial.is_emissive) {
+                segment->color *=
+                    (sampledMaterial.color * sampledMaterial.emissive_factor);
                 segment->remainingBounces = 0;
             } else {
-                float cos_angle = glm::dot(intersection.surfaceNormal, old_dir);
-                segment->color *= material.color;
+                float cos_angle = glm::dot(surfaceNormal, old_dir);
+                segment->color *= sampledMaterial.color;
             }
-
-
 
             segment->remainingBounces--;
             if (orderedPathSegments != NULL) {
@@ -673,7 +839,8 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
 
     computeRayColors<<<numblocksPathSegmentTracing, blockSize1d>>>(
         iter, n, dev_active_intersections, dev_active_paths, dev_geoms,
-        dev_materials, SORT_BY_MATERIAL ? NULL : dev_paths);
+        dev_materials, dev_textures, hst_scene->textures.size(),
+        SORT_BY_MATERIAL ? NULL : dev_paths);
 
     if (guiData != NULL) {
       guiData->TracedDepth = depth;

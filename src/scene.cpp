@@ -8,14 +8,17 @@
 #include <glm/gtx/string_cast.hpp>
 #include "json.hpp"
 #include "tinygltf/tiny_gltf_v3.h"
+#include <stb_image.h>
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #define TINYGLTF3_ENABLE_FS 1
 
@@ -26,7 +29,8 @@ namespace fs = std::filesystem;
 static void appendGltfFile(const std::string& gltfName,
                            const glm::mat4& rootTransform,
                            std::vector<Material>& materials,
-                           std::vector<Triangle>& triangles);
+                           std::vector<Triangle>& triangles,
+                           std::vector<Texture>& textures);
 
 static glm::vec3 readVec3(const json& value)
 {
@@ -158,7 +162,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
             glm::mat4 rootTransform = utilityCore::buildTransformationMatrix(
                 readVec3(trans), readVec3(rotat), readVec3(scale));
             appendGltfFile(meshPath.string(), rootTransform, materials,
-                           triangles);
+                           triangles, textures);
             continue;
         }
 
@@ -256,7 +260,144 @@ static glm::mat4 getNodeLocalTransform(const tg3_node& node)
     return translation * glm::mat4_cast(rotation) * scale;
 }
 
-static int append_materials(const tg3_model &model, std::vector<Material> &materials) {
+static int textureIdForTextureInfo(const tg3_model& model,
+                                   const tg3_texture_info& textureInfo,
+                                   const std::vector<int>& imageTextureIds)
+{
+    if (textureInfo.index < 0 ||
+        textureInfo.index >= (int32_t)model.textures_count)
+    {
+        return -1;
+    }
+
+    int32_t source = model.textures[textureInfo.index].source;
+    if (source < 0 || source >= (int32_t)imageTextureIds.size())
+    {
+        return -1;
+    }
+
+    return imageTextureIds[source];
+}
+
+static int textureIdForTextureInfo(const tg3_model& model,
+                                   const tg3_normal_texture_info& textureInfo,
+                                   const std::vector<int>& imageTextureIds)
+{
+    if (textureInfo.index < 0 ||
+        textureInfo.index >= (int32_t)model.textures_count)
+    {
+        return -1;
+    }
+
+    int32_t source = model.textures[textureInfo.index].source;
+    if (source < 0 || source >= (int32_t)imageTextureIds.size())
+    {
+        return -1;
+    }
+
+    return imageTextureIds[source];
+}
+
+static bool appendDecodedImage(unsigned char* decodedPixels, int width,
+                               int height, int sourceChannels,
+                               std::vector<Texture>& textures,
+                               int& textureId)
+{
+    (void)sourceChannels;
+    if (decodedPixels == nullptr || width <= 0 || height <= 0)
+    {
+        return false;
+    }
+
+    Texture texture{};
+    texture.width = width;
+    texture.height = height;
+    texture.channels = 4;
+    texture.pixels.resize((size_t)width * (size_t)height);
+    memcpy(texture.pixels.data(), decodedPixels,
+           texture.pixels.size() * sizeof(uchar4));
+
+    textureId = (int)textures.size();
+    textures.emplace_back(std::move(texture));
+    return true;
+}
+
+static std::vector<int> append_textures(const tg3_model& model,
+                                        const std::string& gltfName,
+                                        std::vector<Texture>& textures)
+{
+    std::vector<int> imageTextureIds(model.images_count, -1);
+    fs::path gltfDir = fs::path(gltfName).parent_path();
+
+    for (uint32_t i = 0; i < model.images_count; ++i)
+    {
+        const tg3_image& image = model.images[i];
+        int width = 0;
+        int height = 0;
+        int sourceChannels = 0;
+        unsigned char* decodedPixels = nullptr;
+
+        if (image.uri.len > 0)
+        {
+            std::string uri(image.uri.data, image.uri.len);
+            if (uri.rfind("data:", 0) == 0)
+            {
+                cerr << "Skipping embedded data URI image " << i << endl;
+                continue;
+            }
+
+            fs::path imagePath = fs::path(uri);
+            if (imagePath.is_relative())
+            {
+                imagePath = gltfDir / imagePath;
+            }
+
+            decodedPixels = stbi_load(imagePath.string().c_str(), &width,
+                                      &height, &sourceChannels, 4);
+        }
+        else if (image.buffer_view >= 0 &&
+                 image.buffer_view < (int32_t)model.buffer_views_count)
+        {
+            const tg3_buffer_view& bufferView =
+                model.buffer_views[image.buffer_view];
+            if (bufferView.buffer >= 0 &&
+                bufferView.buffer < (int32_t)model.buffers_count)
+            {
+                const tg3_buffer& buffer = model.buffers[bufferView.buffer];
+                uint64_t byteOffset = bufferView.byte_offset;
+                uint64_t byteLength = bufferView.byte_length;
+                if (byteOffset + byteLength <= buffer.data.count)
+                {
+                    decodedPixels = stbi_load_from_memory(
+                        buffer.data.data + byteOffset, (int)byteLength, &width,
+                        &height, &sourceChannels, 4);
+                }
+            }
+        }
+
+        int textureId = -1;
+        if (appendDecodedImage(decodedPixels, width, height, sourceChannels,
+                               textures, textureId))
+        {
+            imageTextureIds[i] = textureId;
+        }
+        else
+        {
+            cerr << "Skipping glTF image " << i << " because it could not be loaded"
+                 << endl;
+        }
+
+        if (decodedPixels != nullptr)
+        {
+            stbi_image_free(decodedPixels);
+        }
+    }
+
+    return imageTextureIds;
+}
+
+static int append_materials(const tg3_model &model, std::vector<Material> &materials,
+                            const std::vector<int>& imageTextureIds) {
     int materialOffset = (int)materials.size();
     uint32_t materialCount = model.materials_count > 0 ? model.materials_count : 1u;
     materials.reserve(materials.size() + materialCount);
@@ -273,6 +414,11 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         newMaterial.alpha = (float)pbr.base_color_factor[3];
 
         newMaterial.metalic_factor = (float)pbr.metallic_factor;
+        if (pbr.metallic_roughness_texture.index < 0 &&
+            pbr.metallic_factor == 1.0)
+        {
+            newMaterial.metalic_factor = 0.0f;
+        }
         newMaterial.roughness_factor = (float)pbr.roughness_factor;
 
         newMaterial.emissive_factor = glm::vec3(
@@ -283,6 +429,18 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         newMaterial.double_sided = mat.double_sided ? 1 : 0;
         newMaterial.hasRefractive = 0;
         newMaterial.indexOfRefraction = 1.0f;
+        newMaterial.baseColorTexId =
+            textureIdForTextureInfo(model, pbr.base_color_texture,
+                                    imageTextureIds);
+        newMaterial.metallicRoughnessTexId =
+            textureIdForTextureInfo(model, pbr.metallic_roughness_texture,
+                                    imageTextureIds);
+        newMaterial.emissiveTexId =
+            textureIdForTextureInfo(model, mat.emissive_texture,
+                                    imageTextureIds);
+        newMaterial.normalTexId =
+            textureIdForTextureInfo(model, mat.normal_texture,
+                                    imageTextureIds);
 
         finishMaterial(newMaterial);
         materials.emplace_back(newMaterial);
@@ -371,6 +529,64 @@ static bool readAccessorVec3(const tg3_model& model, int32_t accessorIndex,
     return true;
 }
 
+static bool readAccessorVec4(const tg3_model& model, int32_t accessorIndex,
+                             uint64_t elementIndex, glm::vec4& out)
+{
+    if (accessorIndex < 0 || accessorIndex >= (int32_t)model.accessors_count)
+    {
+        return false;
+    }
+
+    const tg3_accessor& accessor = model.accessors[accessorIndex];
+    if (accessor.component_type != TG3_COMPONENT_TYPE_FLOAT ||
+        accessor.type != TG3_TYPE_VEC4 || accessor.sparse.is_sparse)
+    {
+        return false;
+    }
+
+    int32_t stride = 0;
+    const uint8_t* ptr =
+        getAccessorElementPtr(model, accessor, elementIndex, stride);
+    if (ptr == nullptr)
+    {
+        return false;
+    }
+
+    float values[4];
+    memcpy(values, ptr, sizeof(values));
+    out = glm::vec4(values[0], values[1], values[2], values[3]);
+    return true;
+}
+
+static bool readAccessorVec2(const tg3_model& model, int32_t accessorIndex,
+                             uint64_t elementIndex, glm::vec2& out)
+{
+    if (accessorIndex < 0 || accessorIndex >= (int32_t)model.accessors_count)
+    {
+        return false;
+    }
+
+    const tg3_accessor& accessor = model.accessors[accessorIndex];
+    if (accessor.component_type != TG3_COMPONENT_TYPE_FLOAT ||
+        accessor.type != TG3_TYPE_VEC2 || accessor.sparse.is_sparse)
+    {
+        return false;
+    }
+
+    int32_t stride = 0;
+    const uint8_t* ptr =
+        getAccessorElementPtr(model, accessor, elementIndex, stride);
+    if (ptr == nullptr)
+    {
+        return false;
+    }
+
+    float values[2];
+    memcpy(values, ptr, sizeof(values));
+    out = glm::vec2(values[0], values[1]);
+    return true;
+}
+
 static bool readAccessorIndex(const tg3_model& model, int32_t accessorIndex,
                               uint64_t elementIndex, uint32_t& out)
 {
@@ -438,6 +654,8 @@ static void parse_primitive_geometry(const tg3_model& model,
     }
 
     int32_t normalAccessor = findAttribute(primitive, "NORMAL");
+    int32_t texcoordAccessor = findAttribute(primitive, "TEXCOORD_0");
+    int32_t tangentAccessor = findAttribute(primitive, "TANGENT");
     int32_t materialId =
         primitive.material >= 0 && primitive.material < (int32_t)model.materials_count
             ? materialOffset + primitive.material
@@ -460,6 +678,7 @@ static void parse_primitive_geometry(const tg3_model& model,
 
     glm::mat3 normalTransform =
         glm::mat3(glm::inverseTranspose(worldTransform));
+    glm::mat3 vectorTransform = glm::mat3(worldTransform);
 
     for (uint64_t i = 0; i + 2 < indexCount; i += 3)
     {
@@ -502,6 +721,22 @@ static void parse_primitive_geometry(const tg3_model& model,
         triangle.v1 = glm::vec3(worldTransform * glm::vec4(positions[1], 1.0f));
         triangle.v2 = glm::vec3(worldTransform * glm::vec4(positions[2], 1.0f));
 
+        if (texcoordAccessor >= 0)
+        {
+            glm::vec2 uvs[3];
+            if (readAccessorVec2(model, texcoordAccessor, vertexIndices[0],
+                                 uvs[0]) &&
+                readAccessorVec2(model, texcoordAccessor, vertexIndices[1],
+                                 uvs[1]) &&
+                readAccessorVec2(model, texcoordAccessor, vertexIndices[2],
+                                 uvs[2]))
+            {
+                triangle.uv0 = uvs[0];
+                triangle.uv1 = uvs[1];
+                triangle.uv2 = uvs[2];
+            }
+        }
+
         if (normalAccessor >= 0)
         {
             glm::vec3 normals[3];
@@ -518,6 +753,25 @@ static void parse_primitive_geometry(const tg3_model& model,
             }
         }
 
+        if (tangentAccessor >= 0)
+        {
+            glm::vec4 tangents[3];
+            if (readAccessorVec4(model, tangentAccessor, vertexIndices[0],
+                                 tangents[0]) &&
+                readAccessorVec4(model, tangentAccessor, vertexIndices[1],
+                                 tangents[1]) &&
+                readAccessorVec4(model, tangentAccessor, vertexIndices[2],
+                                 tangents[2]))
+            {
+                triangle.t0 = glm::normalize(vectorTransform *
+                                             glm::vec3(tangents[0]));
+                triangle.t1 = glm::normalize(vectorTransform *
+                                             glm::vec3(tangents[1]));
+                triangle.t2 = glm::normalize(vectorTransform *
+                                             glm::vec3(tangents[2]));
+            }
+        }
+
         if (glm::dot(triangle.n0, triangle.n0) == 0.0f ||
             glm::dot(triangle.n1, triangle.n1) == 0.0f ||
             glm::dot(triangle.n2, triangle.n2) == 0.0f)
@@ -528,6 +782,37 @@ static void parse_primitive_geometry(const tg3_model& model,
             triangle.n0 = faceNormal;
             triangle.n1 = faceNormal;
             triangle.n2 = faceNormal;
+        }
+
+        if (glm::dot(triangle.t0, triangle.t0) == 0.0f ||
+            glm::dot(triangle.t1, triangle.t1) == 0.0f ||
+            glm::dot(triangle.t2, triangle.t2) == 0.0f)
+        {
+            glm::vec3 edge1 = triangle.v1 - triangle.v0;
+            glm::vec3 edge2 = triangle.v2 - triangle.v0;
+            glm::vec2 duv1 = triangle.uv1 - triangle.uv0;
+            glm::vec2 duv2 = triangle.uv2 - triangle.uv0;
+            float denom = duv1.x * duv2.y - duv2.x * duv1.y;
+            glm::vec3 tangent = glm::vec3(0.0f);
+            if (fabsf(denom) > 0.000001f)
+            {
+                tangent = glm::normalize((edge1 * duv2.y - edge2 * duv1.y) /
+                                         denom);
+            }
+
+            if (glm::dot(tangent, tangent) == 0.0f)
+            {
+                glm::vec3 directionNotNormal =
+                    fabsf(triangle.n0.x) < SQRT_OF_ONE_THIRD
+                        ? glm::vec3(1.0f, 0.0f, 0.0f)
+                        : glm::vec3(0.0f, 1.0f, 0.0f);
+                tangent = glm::normalize(
+                    glm::cross(directionNotNormal, triangle.n0));
+            }
+
+            triangle.t0 = tangent;
+            triangle.t1 = tangent;
+            triangle.t2 = tangent;
         }
 
         triangle.materialid = materialId;
@@ -633,7 +918,8 @@ static void setupDefaultGltfCamera(RenderState& state,
 static void appendGltfFile(const std::string& gltfName,
                            const glm::mat4& rootTransform,
                            std::vector<Material>& materials,
-                           std::vector<Triangle>& triangles) {
+                           std::vector<Triangle>& triangles,
+                           std::vector<Texture>& textures) {
     tg3_parse_options opts;
     tg3_error_stack errors;
     tg3_model model;
@@ -652,7 +938,8 @@ static void appendGltfFile(const std::string& gltfName,
         exit(-1);
     }
 
-    int materialOffset = append_materials(model, materials);
+    std::vector<int> imageTextureIds = append_textures(model, gltfName, textures);
+    int materialOffset = append_materials(model, materials, imageTextureIds);
     parseSceneGeometry(model, rootTransform, materialOffset, triangles);
 
     tg3_model_free(&model);
@@ -662,7 +949,8 @@ static void appendGltfFile(const std::string& gltfName,
 void Scene::loadFromGltf(const std::string &gltfName) {
     materials.clear();
     triangles.clear();
-    appendGltfFile(gltfName, glm::mat4(1.0f), materials, triangles);
+    textures.clear();
+    appendGltfFile(gltfName, glm::mat4(1.0f), materials, triangles, textures);
     setupDefaultGltfCamera(state, triangles, gltfName);
     bvh.BuildBVH(this);
 }

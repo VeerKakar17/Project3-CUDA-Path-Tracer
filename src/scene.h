@@ -17,6 +17,7 @@ public:
     std::vector<Geom> geoms;
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
+    std::vector<Texture> textures;
     BVH bvh;
     RenderState state;
 };

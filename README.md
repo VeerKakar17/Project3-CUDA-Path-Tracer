@@ -18,3 +18,4 @@ project, and we will not be able to grade you without a good README.
 - Added reflective and alpha materials
 - added gltf loading
 - added BVH Tree for mesh acceleration
+- added gltf textures
