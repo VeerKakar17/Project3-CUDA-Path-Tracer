@@ -2,6 +2,9 @@
 
 #include "sceneStructs.h"
 #include <vector>
+#include "bvh.h"
+
+class BVH;
 
 class Scene
 {
@@ -14,5 +17,6 @@ public:
     std::vector<Geom> geoms;
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
+    BVH bvh;
     RenderState state;
 };

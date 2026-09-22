@@ -1,3 +1,4 @@
+#include "bvh.h"
 #include "pathtrace.h"
 
 #include <cmath>
@@ -92,6 +93,7 @@ static glm::vec3 *dev_image = NULL;
 static Geom *dev_geoms = NULL;
 static Triangle *dev_triangles = NULL;
 static Material *dev_materials = NULL;
+static BVHNode *dev_bvh = NULL;
 static PathSegment *dev_paths = NULL;
 static PathSegment *dev_paths_tmp = NULL;
 static PathSegment *dev_paths_tmp2 = NULL;
@@ -140,6 +142,9 @@ void pathtraceInit(Scene *scene) {
              scene->materials.size() * sizeof(Material),
              cudaMemcpyHostToDevice);
 
+  cudaMalloc(&dev_bvh, scene->bvh.nodes.size() * sizeof(BVHNode));
+  cudaMemcpy(dev_bvh, scene->bvh.nodes.data(), scene->bvh.nodes.size() * sizeof(BVHNode), cudaMemcpyHostToDevice);
+
   cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
   cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
   cudaMalloc(&dev_intersections_tmp, pixelcount * sizeof(ShadeableIntersection));
@@ -172,6 +177,7 @@ void pathtraceFree() {
   cudaFree(dev_paths_tmp2);
   cudaFree(dev_geoms);
   cudaFree(dev_triangles);
+  cudaFree(dev_bvh);
   cudaFree(dev_materials);
   cudaFree(dev_intersections);
   cudaFree(dev_intersections_tmp);
@@ -223,16 +229,115 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
   }
 }
 
-// TODO:
-// computeIntersections handles generating ray intersections ONLY.
-// Generating new rays is handled in your shader(s).
-// Feel free to modify the code below.
+__device__ float IntersectAABB(const Ray &ray, const BVHNode &node,
+                               float maxT) {
+  float tmin = 0.0f;
+  float tmax = maxT;
+
+  for (int axis = 0; axis < 3; ++axis) {
+    float origin = ray.origin[axis];
+    float direction = ray.direction[axis];
+    float minBound = node.aabbMin[axis];
+    float maxBound = node.aabbMax[axis];
+
+    if (fabsf(direction) < 0.0000001f) {
+      if (origin < minBound || origin > maxBound) {
+        return FLT_MAX;
+      }
+      continue;
+    }
+
+    float invDir = 1.0f / direction;
+    float t1 = (minBound - origin) * invDir;
+    float t2 = (maxBound - origin) * invDir;
+    tmin = fmaxf(tmin, fminf(t1, t2));
+    tmax = fminf(tmax, fmaxf(t1, t2));
+  }
+
+  if (tmax >= tmin && tmin < maxT) {
+    return tmin;
+  }
+  return FLT_MAX;
+}
+
+__device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
+                             int triangles_size, BVHNode *bvh, float &tMin,
+                             glm::vec3 &intersectPoint, glm::vec3 &normal,
+                             int &materialId) {
+  bool hit = false;
+  int nodeIdx = 0;
+  constexpr int STACK_SIZE = 128;
+  int stack[STACK_SIZE];
+  int stackPtr = 0;
+
+  while (true) {
+    BVHNode &node = bvh[nodeIdx];
+
+    if (node.isLeaf()) {
+      for (uint32_t i = 0; i < node.triCount; ++i) {
+        int triangleIdx = (int)(node.firstTriIdx + i);
+        if (triangleIdx >= triangles_size) {
+          continue;
+        }
+
+        glm::vec3 tmpIntersect;
+        glm::vec3 tmpNormal;
+        bool outside = true;
+        float t = triangleIntersectionTest(triangles[triangleIdx], ray,
+                                           tmpIntersect, tmpNormal, outside);
+        if (t > 0.0f && t < tMin) {
+          hit = true;
+          tMin = t;
+          intersectPoint = tmpIntersect;
+          normal = tmpNormal;
+          materialId = triangles[triangleIdx].materialid;
+        }
+      }
+
+      if (stackPtr == 0) {
+        break;
+      }
+      nodeIdx = stack[--stackPtr];
+      continue;
+    }
+
+    int child1 = (int)node.leftNode;
+    int child2 = child1 + 1;
+    float dist1 = IntersectAABB(ray, bvh[child1], tMin);
+    float dist2 = IntersectAABB(ray, bvh[child2], tMin);
+
+    if (dist1 > dist2) {
+      float tempDist = dist1;
+      dist1 = dist2;
+      dist2 = tempDist;
+
+      int tempChild = child1;
+      child1 = child2;
+      child2 = tempChild;
+    }
+
+    if (dist1 == FLT_MAX) {
+      if (stackPtr == 0) {
+        break;
+      }
+      nodeIdx = stack[--stackPtr];
+    } else {
+      nodeIdx = child1;
+      if (dist2 != FLT_MAX && stackPtr < STACK_SIZE) {
+        stack[stackPtr++] = child2;
+      }
+    }
+  }
+
+  return hit;
+}
+
 __global__ void computeIntersections(int depth, int num_paths,
                                      PathSegment *pathSegments, Geom *geoms,
                                      int geoms_size, Triangle *triangles,
                                      int triangles_size,
                                      ShadeableIntersection *intersections,
-                                     PathSegment *orderedPathSegments) {
+                                     PathSegment *orderedPathSegments, BVHNode *bvh) {
   int path_index = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (path_index < num_paths) {
@@ -275,18 +380,11 @@ __global__ void computeIntersections(int depth, int num_paths,
         }
       }
 
-      for (int i = 0; i < triangles_size; i++) {
-        Triangle &triangle = triangles[i];
-        t = triangleIntersectionTest(triangle, pathSegment.ray, tmp_intersect,
-                                     tmp_normal, outside);
-
-        if (t > 0.0f && t_min > t) {
-          t_min = t;
-          hit_geom_index = -1;
-          hit_material_id = triangle.materialid;
-          intersect_point = tmp_intersect;
-          normal = tmp_normal;
-        }
+      if (BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
+                       tmp_intersect, tmp_normal, hit_material_id)) {
+        hit_geom_index = -1;
+        intersect_point = tmp_intersect;
+        normal = tmp_normal;
       }
 
       if (hit_material_id == -1) {
@@ -510,7 +608,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>>(
         depth, n, dev_active_paths, dev_geoms, hst_scene->geoms.size(),
         dev_triangles, hst_scene->triangles.size(),
-        dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths);
+        dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths, dev_bvh);
     checkCUDAError("trace one bounce");
     // cudaDeviceSynchronize();
     depth++;

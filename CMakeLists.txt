@@ -49,6 +49,7 @@ find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
 
 set(headers
+    src/bvh.h
     src/image.h
     src/interactions.h
     src/intersections.h
@@ -61,6 +62,7 @@ set(headers
 
 set(sources
     src/main.cpp
+    src/bvh.cpp
     src/stb.cpp
     src/image.cpp
     src/glslUtility.cpp

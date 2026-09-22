@@ -17,3 +17,4 @@ project, and we will not be able to grade you without a good README.
 - added stream comopaction + material based optimization
 - Added reflective and alpha materials
 - added gltf loading
+- added BVH Tree for mesh acceleration

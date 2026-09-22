@@ -199,6 +199,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.up = glm::vec3(up[0], up[1], up[2]);
 
     finalizeCamera(state, fovy);
+    bvh.BuildBVH(this);
 }
 
 static int32_t findAttribute(
@@ -663,4 +664,5 @@ void Scene::loadFromGltf(const std::string &gltfName) {
     triangles.clear();
     appendGltfFile(gltfName, glm::mat4(1.0f), materials, triangles);
     setupDefaultGltfCamera(state, triangles, gltfName);
+    bvh.BuildBVH(this);
 }
