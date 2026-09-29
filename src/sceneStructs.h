@@ -49,7 +49,6 @@ struct Material
     float alpha;
 
     uint8_t is_metalic;
-    float metalic_factor;
     float roughness_factor;
 
     struct

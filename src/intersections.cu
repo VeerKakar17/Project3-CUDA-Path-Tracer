@@ -148,32 +148,28 @@ __host__ __device__ float triangleIntersectionTest(
 {
     const float epsilon = 0.000001f;
     glm::vec3 direction = glm::normalize(r.direction);
-    glm::vec3 edge1 = triangle.v1 - triangle.v0;
-    glm::vec3 edge2 = triangle.v2 - triangle.v0;
-    glm::vec3 pvec = glm::cross(direction, edge2);
-    float det = glm::dot(edge1, pvec);
+    glm::vec3 baryPosition;
+    bool hit = glm::intersectRayTriangle(r.origin, direction, triangle.v0,
+                                         triangle.v1, triangle.v2,
+                                         baryPosition);
+    float u = baryPosition.x;
+    float v = baryPosition.y;
+    float t = baryPosition.z;
+    if (!hit)
+    {
+        hit = glm::intersectRayTriangle(r.origin, direction, triangle.v0,
+                                        triangle.v2, triangle.v1,
+                                        baryPosition);
+        u = baryPosition.y;
+        v = baryPosition.x;
+        t = baryPosition.z;
+    }
 
-    if (fabsf(det) < epsilon)
+    if (!hit)
     {
         return -1;
     }
 
-    float invDet = 1.0f / det;
-    glm::vec3 tvec = r.origin - triangle.v0;
-    float u = glm::dot(tvec, pvec) * invDet;
-    if (u < 0.0f || u > 1.0f)
-    {
-        return -1;
-    }
-
-    glm::vec3 qvec = glm::cross(tvec, edge1);
-    float v = glm::dot(direction, qvec) * invDet;
-    if (v < 0.0f || u + v > 1.0f)
-    {
-        return -1;
-    }
-
-    float t = glm::dot(edge2, qvec) * invDet;
     if (t <= epsilon)
     {
         return -1;
@@ -190,6 +186,8 @@ __host__ __device__ float triangleIntersectionTest(
     tangent = w * triangle.t0 + u * triangle.t1 + v * triangle.t2;
     if (glm::dot(normal, normal) <= epsilon)
     {
+        glm::vec3 edge1 = triangle.v1 - triangle.v0;
+        glm::vec3 edge2 = triangle.v2 - triangle.v0;
         normal = glm::cross(edge1, edge2);
     }
     normal = glm::normalize(normal);

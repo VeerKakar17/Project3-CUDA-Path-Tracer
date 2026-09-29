@@ -557,14 +557,12 @@ __global__ void computeRayColors(int iter, int num_paths,
             glm::vec3 baseColor = material.color * glm::vec3(baseColorSample);
             float alpha = material.alpha * baseColorSample.a;
 
-            float metallic = material.metalic_factor;
             float roughness = material.roughness_factor;
             if (material.metallicRoughnessTexId >= 0) {
                 glm::vec4 metallicRoughness = sample_texture(
                     textures, textures_size, material.metallicRoughnessTexId,
                     intersection.uv);
                 roughness = saturateFloat(roughness * metallicRoughness.g);
-                metallic = saturateFloat(metallic * metallicRoughness.b);
             }
 
             glm::vec3 emission = material.emissive_factor;
@@ -577,9 +575,7 @@ __global__ void computeRayColors(int iter, int num_paths,
             Material sampledMaterial = material;
             sampledMaterial.color = baseColor;
             sampledMaterial.alpha = alpha;
-            sampledMaterial.metalic_factor = metallic;
             sampledMaterial.roughness_factor = roughness;
-            sampledMaterial.is_metalic = metallic > 0.0f ? 1 : 0;
             sampledMaterial.emissive_factor = emission;
             sampledMaterial.is_emissive =
                 glm::dot(emission, emission) > 0.0f ? 1 : 0;
@@ -625,15 +621,15 @@ __global__ void computeRayColors(int iter, int num_paths,
                 return;
             }
 
-            scatterRay(*segment, intersect_point, surfaceNormal, sampledMaterial,
-                       rng);
+            float scatterMultiplier =
+                scatterRay(*segment, intersect_point, surfaceNormal,
+                           sampledMaterial, rng);
             if (sampledMaterial.is_emissive) {
-                segment->color *=
-                    (sampledMaterial.color * sampledMaterial.emissive_factor);
+                segment->color *= sampledMaterial.emissive_factor;
                 segment->remainingBounces = 0;
             } else {
                 float cos_angle = glm::dot(surfaceNormal, old_dir);
-                segment->color *= sampledMaterial.color;
+                segment->color *= sampledMaterial.color * scatterMultiplier;
             }
 
             segment->remainingBounces--;

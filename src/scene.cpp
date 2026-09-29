@@ -39,15 +39,68 @@ static glm::vec3 readVec3(const json& value)
 
 static void finishMaterial(Material& material)
 {
-    material.is_metalic = material.metalic_factor > 0.0f ? 1 : 0;
     material.is_emissive =
         glm::dot(material.emissive_factor, material.emissive_factor) > 0.0f
             ? 1
             : 0;
     material.specular.color =
-        glm::mix(glm::vec3(0.04f), material.color, material.metalic_factor);
+        material.is_metalic ? material.color : glm::vec3(0.04f);
     material.specular.exponent =
         (1.0f - material.roughness_factor) * 256.0f + 1.0f;
+}
+
+static bool tg3StrEquals(const tg3_str& str, const char* literal)
+{
+    size_t literalLength = strlen(literal);
+    return str.data != nullptr && str.len == literalLength &&
+           strncmp(str.data, literal, literalLength) == 0;
+}
+
+static const tg3_value* findTg3ObjectValue(const tg3_value& value,
+                                           const char* key)
+{
+    if (value.type != TG3_VALUE_OBJECT)
+    {
+        return nullptr;
+    }
+
+    for (uint32_t i = 0; i < value.object_count; ++i)
+    {
+        if (tg3StrEquals(value.object_data[i].key, key))
+        {
+            return &value.object_data[i].value;
+        }
+    }
+    return nullptr;
+}
+
+static float getEmissiveStrength(const tg3_material& material)
+{
+    for (uint32_t i = 0; i < material.ext.extensions_count; ++i)
+    {
+        const tg3_extension& extension = material.ext.extensions[i];
+        if (!tg3StrEquals(extension.name, "KHR_materials_emissive_strength"))
+        {
+            continue;
+        }
+
+        const tg3_value* strength =
+            findTg3ObjectValue(extension.value, "emissiveStrength");
+        if (strength == nullptr)
+        {
+            return 1.0f;
+        }
+        if (strength->type == TG3_VALUE_REAL)
+        {
+            return (float)strength->real_val;
+        }
+        if (strength->type == TG3_VALUE_INT)
+        {
+            return (float)strength->int_val;
+        }
+        return 1.0f;
+    }
+    return 1.0f;
 }
 
 static void finalizeCamera(RenderState& state, float fovy)
@@ -105,7 +158,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
         const auto& col = p["RGB"];
         newMaterial.color = readVec3(col);
         newMaterial.alpha = p.value("ALPHA", 1.0f);
-        newMaterial.metalic_factor = p.value("METALLIC", 0.0f);
+        newMaterial.is_metalic = p.value("METALLIC", 0.0f) > 0.0f ? 1 : 0;
         newMaterial.roughness_factor = p.value("ROUGHNESS", 1.0f);
         newMaterial.emissive_factor = glm::vec3(0.0f);
         newMaterial.double_sided = p.value("DOUBLE_SIDED", false) ? 1 : 0;
@@ -126,7 +179,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
         {
             if (!p.contains("METALLIC"))
             {
-                newMaterial.metalic_factor = 1.0f;
+                newMaterial.is_metalic = 1;
             }
             if (!p.contains("ROUGHNESS"))
             {
@@ -413,18 +466,19 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
             (float)pbr.base_color_factor[2]);
         newMaterial.alpha = (float)pbr.base_color_factor[3];
 
-        newMaterial.metalic_factor = (float)pbr.metallic_factor;
+        newMaterial.is_metalic = pbr.metallic_factor > 0.0 ? 1 : 0;
         if (pbr.metallic_roughness_texture.index < 0 &&
             pbr.metallic_factor == 1.0)
         {
-            newMaterial.metalic_factor = 0.0f;
+            newMaterial.is_metalic = 0;
         }
         newMaterial.roughness_factor = (float)pbr.roughness_factor;
 
         newMaterial.emissive_factor = glm::vec3(
             (float)mat.emissive_factor[0],
             (float)mat.emissive_factor[1],
-            (float)mat.emissive_factor[2]);
+            (float)mat.emissive_factor[2]) *
+            getEmissiveStrength(mat);
 
         newMaterial.double_sided = mat.double_sided ? 1 : 0;
         newMaterial.hasRefractive = 0;
@@ -451,7 +505,7 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         Material defaultMaterial{};
         defaultMaterial.color = glm::vec3(1.0f);
         defaultMaterial.alpha = 1.0f;
-        defaultMaterial.metalic_factor = 0.0f;
+        defaultMaterial.is_metalic = 0;
         defaultMaterial.roughness_factor = 1.0f;
         defaultMaterial.emissive_factor = glm::vec3(0.0f);
         defaultMaterial.double_sided = 0;
