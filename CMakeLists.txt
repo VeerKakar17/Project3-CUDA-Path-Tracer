@@ -53,6 +53,8 @@ set(headers
     src/image.h
     src/interactions.h
     src/intersections.h
+    src/microfacet.h
+    src/nee.h
     src/glslUtility.hpp
     src/pathtrace.h
     src/scene.h
@@ -69,6 +71,8 @@ set(sources
     src/pathtrace.cu
     src/intersections.cu
     src/interactions.cu
+    src/microfacet.cu
+    src/nee.cu
     src/scene.cpp
     src/tinygltf/tiny_gltf_v3.c
     src/utilities.cpp

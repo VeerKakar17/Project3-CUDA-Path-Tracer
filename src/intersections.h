@@ -99,4 +99,5 @@ __host__ __device__ float triangleIntersectionTest(
     glm::vec3& normal,
     bool& outside,
     glm::vec2& uv,
-    glm::vec3& tangent);
+    glm::vec3& tangent,
+    float& tangentSign);

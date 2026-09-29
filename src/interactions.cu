@@ -1,10 +1,21 @@
 #include "interactions.h"
 
+#include "intersections.h"
+#include "microfacet.h"
+#include "nee.h"
 #include "utilities.h"
 
 #include <thrust/random.h>
 
 #define REMAP_ROUGHNESS 0
+#define SHADOW_RAY_EPSILON 0.0002f
+
+__device__ float power_heuristic(float pdfA, float pdfB) {
+    float pdfA2 = pdfA * pdfA;
+    float pdfB2 = pdfB * pdfB;
+    float denom = pdfA2 + pdfB2;
+    return denom > 0.0f ? pdfA2 / denom : 0.0f;
+}
 
 __host__ __device__ glm::vec3
 calculateRandomDirectionInHemisphere(glm::vec3 normal,
@@ -39,174 +50,294 @@ calculateRandomDirectionInHemisphere(glm::vec3 normal,
          sin(around) * over * perpendicularDirection2;
 }
 
-__host__ __device__ float abs_cos_theta(const glm::vec3 &w) {
-    return fabsf(w.z);
-}
+__device__ float shadow_intersect_aabb(const Ray& ray, const BVHNode& node,
+                                       float maxT) {
+    float tmin = 0.0f;
+    float tmax = maxT;
 
-__host__ __device__ bool same_hemisphere(const glm::vec3 &a,
-                                         const glm::vec3 &b) {
-    return a.z * b.z > 0.0f;
-}
+    for (int axis = 0; axis < 3; ++axis) {
+        float origin = ray.origin[axis];
+        float direction = ray.direction[axis];
+        float minBound = node.aabbMin[axis];
+        float maxBound = node.aabbMax[axis];
 
-__host__ __device__ glm::vec3 to_local(const glm::vec3 &v,
-                                       const glm::vec3 &tangent,
-                                       const glm::vec3 &bitangent,
-                                       const glm::vec3 &normal) {
-    return glm::vec3(glm::dot(v, tangent), glm::dot(v, bitangent),
-                     glm::dot(v, normal));
-}
+        if (fabsf(direction) < 0.0000001f) {
+            if (origin < minBound || origin > maxBound) {
+                return FLT_MAX;
+            }
+            continue;
+        }
 
-__host__ __device__ glm::vec3 to_world(const glm::vec3 &v,
-                                       const glm::vec3 &tangent,
-                                       const glm::vec3 &bitangent,
-                                       const glm::vec3 &normal) {
-    return v.x * tangent + v.y * bitangent + v.z * normal;
-}
-
-__host__ __device__ void make_basis(const glm::vec3 &normal,
-                                    glm::vec3 &tangent,
-                                    glm::vec3 &bitangent) {
-    glm::vec3 helper = fabsf(normal.x) < SQRT_OF_ONE_THIRD
-                           ? glm::vec3(1.0f, 0.0f, 0.0f)
-                           : glm::vec3(0.0f, 1.0f, 0.0f);
-    tangent = glm::normalize(glm::cross(helper, normal));
-    bitangent = glm::cross(normal, tangent);
-}
-
-__host__ __device__ float get_d_ggx(const glm::vec3 &m, float alpha) {
-    float cosTheta = abs_cos_theta(m);
-    if (cosTheta <= 0.0f) {
-        return 0.0f;
+        float invDir = 1.0f / direction;
+        float t1 = (minBound - origin) * invDir;
+        float t2 = (maxBound - origin) * invDir;
+        tmin = fmaxf(tmin, fminf(t1, t2));
+        tmax = fminf(tmax, fmaxf(t1, t2));
     }
 
-    float alpha2 = alpha * alpha;
-    float cosTheta2 = cosTheta * cosTheta;
-    float inner = cosTheta2 * (alpha2 - 1.0f) + 1.0f;
-    return alpha2 / (PI * inner * inner);
+    return tmax >= tmin && tmin < maxT ? tmin : FLT_MAX;
 }
 
-__host__ __device__ float get_pdf(const glm::vec3 &wo,
-                                  const glm::vec3 &wm,
-                                  float alpha) {
-    float woDotWm = fabsf(glm::dot(wo, wm));
-    if (woDotWm <= 0.0f) {
-        return 0.0f;
-    }
-    return get_d_ggx(wm, alpha) * abs_cos_theta(wm) / (4.0f * woDotWm);
-}
-
-__host__ __device__ float get_g_lambda(const glm::vec3 &w, float alpha) {
-    float cosTheta = abs_cos_theta(w);
-    if (cosTheta <= 0.0f) {
-        return 0.0f;
+__device__ bool shadow_bvh_occluded(const Ray& shadowRay,
+                                    Triangle* triangles,
+                                    int triangles_size,
+                                    BVHNode* bvh,
+                                    float maxDistance) {
+    if (triangles == nullptr || triangles_size <= 0 || bvh == nullptr) {
+        return false;
     }
 
-    float cosTheta2 = cosTheta * cosTheta;
-    float sinTheta2 = fmaxf(0.0f, 1.0f - cosTheta2);
-    float tanTheta2 = sinTheta2 / cosTheta2;
-    return 0.5f * (sqrtf(1.0f + alpha * alpha * tanTheta2) - 1.0f);
+    int nodeIdx = 0;
+    constexpr int STACK_SIZE = 128;
+    int stack[STACK_SIZE];
+    int stackPtr = 0;
+
+    while (true) {
+        BVHNode& node = bvh[nodeIdx];
+
+        if (node.isLeaf()) {
+            for (uint32_t i = 0; i < node.triCount; ++i) {
+                int triangleIdx = (int)(node.firstTriIdx + i);
+                if (triangleIdx >= triangles_size) {
+                    continue;
+                }
+
+                glm::vec3 intersectPoint;
+                glm::vec3 normal;
+                bool outside = true;
+                float t = triangleIntersectionTest(
+                    triangles[triangleIdx], shadowRay, intersectPoint, normal,
+                    outside);
+                if (t > SHADOW_RAY_EPSILON && t < maxDistance) {
+                    return true;
+                }
+            }
+
+            if (stackPtr == 0) {
+                break;
+            }
+            nodeIdx = stack[--stackPtr];
+            continue;
+        }
+
+        int child1 = (int)node.leftNode;
+        int child2 = child1 + 1;
+        float dist1 = shadow_intersect_aabb(shadowRay, bvh[child1],
+                                            maxDistance);
+        float dist2 = shadow_intersect_aabb(shadowRay, bvh[child2],
+                                            maxDistance);
+
+        if (dist1 > dist2) {
+            float tempDist = dist1;
+            dist1 = dist2;
+            dist2 = tempDist;
+
+            int tempChild = child1;
+            child1 = child2;
+            child2 = tempChild;
+        }
+
+        if (dist1 == FLT_MAX) {
+            if (stackPtr == 0) {
+                break;
+            }
+            nodeIdx = stack[--stackPtr];
+        } else {
+            nodeIdx = child1;
+            if (dist2 != FLT_MAX && stackPtr < STACK_SIZE) {
+                stack[stackPtr++] = child2;
+            }
+        }
+    }
+
+    return false;
 }
 
-__host__ __device__ float get_g1(const glm::vec3 &w, float alpha) {
-    return 1.0f / (1.0f + get_g_lambda(w, alpha));
+__device__ bool shadow_ray_visible(const glm::vec3& origin,
+                                   const NeeSample& neeSample,
+                                   Geom* geoms,
+                                   int geoms_size,
+                                   Triangle* triangles,
+                                   int triangles_size,
+                                   BVHNode* bvh) {
+    float maxDistance = neeSample.distance - 2.0f * SHADOW_RAY_EPSILON;
+    if (maxDistance <= SHADOW_RAY_EPSILON) {
+        return false;
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = origin + SHADOW_RAY_EPSILON * neeSample.wi;
+    shadowRay.direction = neeSample.wi;
+
+    for (int i = 0; i < geoms_size; ++i) {
+        Geom& geom = geoms[i];
+        glm::vec3 intersectPoint;
+        glm::vec3 normal;
+        bool outside = true;
+        float t = -1.0f;
+        if (geom.type == CUBE) {
+            t = boxIntersectionTest(geom, shadowRay, intersectPoint, normal,
+                                    outside);
+        } else if (geom.type == SPHERE) {
+            t = sphereIntersectionTest(geom, shadowRay, intersectPoint, normal,
+                                       outside);
+        }
+
+        if (t > SHADOW_RAY_EPSILON && t < maxDistance) {
+            return false;
+        }
+    }
+
+    return !shadow_bvh_occluded(shadowRay, triangles, triangles_size, bvh,
+                                maxDistance);
 }
 
-__host__ __device__ float get_g_ggx(const glm::vec3 &wi,
-                                    const glm::vec3 &wo,
-                                    float alpha) {
-    return 1.0f /
-           (1.0f + get_g_lambda(wo, alpha) + get_g_lambda(wi, alpha));
+__device__ glm::vec3 evaluate_bsdf_for_direction(
+    const Material& m,
+    const glm::vec3& woWorld,
+    const glm::vec3& wiWorld,
+    const glm::vec3& normal) {
+    if (m.is_metalic) {
+        if (m.roughness_factor < 0.001f) {
+            return glm::vec3(0.0f);
+        }
+
+        float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
+#if REMAP_ROUGHNESS
+        alpha = alpha * alpha;
+#endif
+        return Microfacet::evaluate_brdf(woWorld, wiWorld, normal, m, alpha);
+    }
+
+    if (glm::dot(normal, woWorld) <= 0.0f ||
+        glm::dot(normal, wiWorld) <= 0.0f) {
+        return glm::vec3(0.0f);
+    }
+    return m.color / PI;
 }
 
-__host__ __device__ float get_f_ggx(const glm::vec3 &wi,
-                                    const glm::vec3 &wo,
-                                    float alpha) {
-    const float f0 = 0.04f;
-    glm::vec3 wm = glm::normalize(wi + wo);
-    float cosTheta = fminf(fmaxf(fabsf(glm::dot(wi, wm)), 0.0f), 1.0f);
-    float oneMinusCos = 1.0f - cosTheta;
-    float oneMinusCos2 = oneMinusCos * oneMinusCos;
-    return f0 + (1.0f - f0) * oneMinusCos2 * oneMinusCos2 * oneMinusCos;
+__device__ float evaluate_bsdf_pdf_for_direction(
+    const Material& m,
+    const glm::vec3& woWorld,
+    const glm::vec3& wiWorld,
+    const glm::vec3& normal) {
+    if (m.is_metalic) {
+        if (m.roughness_factor < 0.001f) {
+            return 0.0f;
+        }
+
+        float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
+#if REMAP_ROUGHNESS
+        alpha = alpha * alpha;
+#endif
+        return Microfacet::evaluate_pdf(woWorld, wiWorld, normal, alpha);
+    }
+
+    if (glm::dot(normal, woWorld) <= 0.0f ||
+        glm::dot(normal, wiWorld) <= 0.0f) {
+        return 0.0f;
+    }
+    return fmaxf(glm::dot(normal, wiWorld), 0.0f) / PI;
 }
 
-__host__ __device__ glm::vec3 sample_wm(float alpha, const glm::vec2 &u) {
-    float phi = TWO_PI * u.x;
-    float alpha2 = alpha * alpha;
-    float cosTheta =
-        sqrtf((1.0f - u.y) / (1.0f + (alpha2 - 1.0f) * u.y));
-    float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
+__device__ glm::vec3 evaluateEmissiveHit(
+    const PathSegment& pathSegment,
+    glm::vec3 hitPoint,
+    glm::vec3 lightNormal,
+    int triangleId,
+    const Material& lightMaterial,
+    SceneLight* lights,
+    int lights_size,
+    Triangle* triangles,
+    int triangles_size) {
+    float misWeight = 1.0f;
+    if (!pathSegment.lastBounceWasSpecular &&
+        pathSegment.lastBsdfPdf > 0.0f &&
+        triangleId >= 0) {
+        float lightPdf = Nee::pdf_light_for_triangle_hit(
+            pathSegment.ray.origin, hitPoint, lightNormal, triangleId, lights,
+            lights_size, triangles, triangles_size, lightMaterial);
+        misWeight = power_heuristic(pathSegment.lastBsdfPdf, lightPdf);
+    }
 
-    return glm::normalize(glm::vec3(cosf(phi) * sinTheta,
-                                    sinf(phi) * sinTheta,
-                                    cosTheta));
+    return misWeight * lightMaterial.emissive_factor;
 }
 
-// returns multiplier for color
-__host__ __device__ float scatterRay(PathSegment &pathSegment,
+__device__ ScatterResult scatterRay(PathSegment &pathSegment,
                                     glm::vec3 intersect, glm::vec3 normal,
                                     const Material &m,
+                                    SceneLight *lights,
+                                    int lights_size,
+                                    Geom *geoms,
+                                    int geoms_size,
+                                    Triangle *triangles,
+                                    int triangles_size,
+                                    BVHNode *bvh,
+                                    Material *materials,
+                                    int materials_size,
                                     thrust::default_random_engine &rng) {
+    ScatterResult result;
+    result.throughputMultiplier = glm::vec3(0.0f);
+    result.contribution = glm::vec3(0.0f);
+    result.pdf = 0.0f;
+    result.wasSpecular = false;
+
+    glm::vec3 woWorld = glm::normalize(-pathSegment.ray.direction);
+    bool isPerfectSpecular = m.is_metalic && m.roughness_factor < 0.001f;
+    if (!isPerfectSpecular) {
+        NeeSample neeSample =
+            Nee::get_nee(intersect, normal, lights, lights_size, triangles,
+                         triangles_size, materials, materials_size, rng);
+        if (neeSample.valid &&
+            shadow_ray_visible(intersect, neeSample, geoms, geoms_size,
+                               triangles, triangles_size, bvh)) {
+            glm::vec3 bsdf =
+                evaluate_bsdf_for_direction(m, woWorld, neeSample.wi, normal);
+            float bsdfPdf =
+                evaluate_bsdf_pdf_for_direction(m, woWorld, neeSample.wi,
+                                                normal);
+            float cosSurface = fmaxf(glm::dot(normal, neeSample.wi), 0.0f);
+            if (cosSurface > 0.0f && neeSample.pdfLight > 0.0f) {
+                float misWeight = power_heuristic(neeSample.pdfLight, bsdfPdf);
+                result.contribution =
+                    misWeight * neeSample.Li * bsdf * cosSurface /
+                    neeSample.pdfLight;
+            }
+        }
+    }
+
     if (m.is_metalic) {
         if (m.roughness_factor < 0.001) {
             pathSegment.ray.direction = glm::reflect(pathSegment.ray.direction, normal);
             pathSegment.ray.origin = intersect;
-            return 1.0f;
+            result.throughputMultiplier = m.color;
+            result.pdf = 1.0f;
+            result.wasSpecular = true;
+            return result;
         } else {
             float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
 #if REMAP_ROUGHNESS
             alpha = alpha * alpha;
 #endif
 
-            thrust::uniform_real_distribution<float> u01(0, 1);
-            glm::vec2 u(u01(rng), u01(rng));
-
-            glm::vec3 tangent;
-            glm::vec3 bitangent;
-            make_basis(normal, tangent, bitangent);
-
-            glm::vec3 woWorld = glm::normalize(-pathSegment.ray.direction);
-            glm::vec3 wo = to_local(woWorld, tangent, bitangent, normal);
-            if (wo.z <= 0.0f) {
-                pathSegment.ray.direction =
-                    glm::reflect(pathSegment.ray.direction, normal);
-                pathSegment.ray.origin = intersect;
-                return 1.0f;
-            }
-
-            glm::vec3 wm = sample_wm(alpha, u);
-            glm::vec3 wi = glm::reflect(-wo, wm);
-            if (!same_hemisphere(wo, wi) || wi.z <= 0.0f) {
-                pathSegment.ray.direction =
-                    calculateRandomDirectionInHemisphere(normal, rng);
-                pathSegment.ray.origin = intersect;
-                return 0.0f;
-            }
-
-            pathSegment.ray.direction =
-                glm::normalize(to_world(wi, tangent, bitangent, normal));
-            pathSegment.ray.origin = intersect;
-
-            float pdf = get_pdf(wo, wm, alpha);
-            if (pdf <= 0.0f) {
-                return 0.0f;
-            }
-
-            float cosThetaO = abs_cos_theta(wo);
-            float cosThetaI = abs_cos_theta(wi);
-            float d = get_d_ggx(wm, alpha);
-            float g = get_g_ggx(wi, wo, alpha);
-            float f = get_f_ggx(wi, wo, alpha);
-            float brdf = d * g * f / (4.0f * cosThetaI * cosThetaO);
-
-            return brdf * cosThetaI / pdf;
+            ScatterResult sampledResult =
+                Microfacet::get_brdf_result(pathSegment, intersect, normal, m,
+                                            alpha, rng);
+            sampledResult.contribution = result.contribution;
+            return sampledResult;
         }
 
         pathSegment.ray.origin = intersect;
-        return 1.0f;
+        result.throughputMultiplier = m.color;
+        result.pdf = 1.0f;
+        result.wasSpecular = true;
+        return result;
     } else {
         pathSegment.ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
         pathSegment.ray.origin = intersect;
-        return 1.0f;
+        float cosTheta = fmaxf(glm::dot(normal, pathSegment.ray.direction), 0.0f);
+        result.throughputMultiplier = m.color;
+        result.pdf = cosTheta / PI;
+        return result;
     }
-    
 }

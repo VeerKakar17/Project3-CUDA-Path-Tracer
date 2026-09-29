@@ -121,11 +121,66 @@ static void finalizeCamera(RenderState& state, float fovy)
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
 }
 
+void Scene::buildLightList()
+{
+    lights.clear();
+
+    for (size_t i = 0; i < triangles.size(); ++i)
+    {
+        const Triangle& triangle = triangles[i];
+        if (triangle.materialid < 0 ||
+            triangle.materialid >= (int)materials.size())
+        {
+            continue;
+        }
+
+        const Material& material = materials[triangle.materialid];
+        if (!material.is_emissive)
+        {
+            continue;
+        }
+
+        glm::vec3 edge1 = triangle.v1 - triangle.v0;
+        glm::vec3 edge2 = triangle.v2 - triangle.v0;
+        glm::vec3 normal = glm::cross(edge1, edge2);
+        float normalLength = glm::length(normal);
+        if (normalLength <= 0.0f)
+        {
+            continue;
+        }
+
+        SceneLight light{};
+        light.type = SCENE_LIGHT_TRIANGLE;
+        light.id = (int)i;
+        lights.push_back(light);
+    }
+
+    for (size_t i = 0; i < geoms.size(); ++i)
+    {
+        const Geom& geom = geoms[i];
+        if (geom.materialid < 0 || geom.materialid >= (int)materials.size())
+        {
+            continue;
+        }
+
+        const Material& material = materials[geom.materialid];
+        if (!material.is_emissive)
+        {
+            continue;
+        }
+
+        SceneLight light{};
+        light.type = SCENE_LIGHT_GEOM;
+        light.id = (int)i;
+        lights.push_back(light);
+    }
+}
+
 Scene::Scene(string filename)
 {
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
-    auto ext = filename.substr(filename.find_last_of('.'));
+    auto ext = fs::path(filename).extension().string();
     if (ext == ".json")
     {
         loadFromJSON(filename);
@@ -158,12 +213,36 @@ void Scene::loadFromJSON(const std::string& jsonName)
         const auto& col = p["RGB"];
         newMaterial.color = readVec3(col);
         newMaterial.alpha = p.value("ALPHA", 1.0f);
+        newMaterial.alphaMode =
+            newMaterial.alpha < 1.0f ? ALPHA_MODE_BLEND : ALPHA_MODE_OPAQUE;
+        if (p.contains("ALPHA_MODE"))
+        {
+            std::string alphaMode = p["ALPHA_MODE"];
+            if (alphaMode == "MASK")
+            {
+                newMaterial.alphaMode = ALPHA_MODE_MASK;
+            }
+            else if (alphaMode == "BLEND")
+            {
+                newMaterial.alphaMode = ALPHA_MODE_BLEND;
+            }
+            else
+            {
+                newMaterial.alphaMode = ALPHA_MODE_OPAQUE;
+            }
+        }
+        newMaterial.alphaCutoff = p.value("ALPHA_CUTOFF", 0.5f);
         newMaterial.is_metalic = p.value("METALLIC", 0.0f) > 0.0f ? 1 : 0;
         newMaterial.roughness_factor = p.value("ROUGHNESS", 1.0f);
         newMaterial.emissive_factor = glm::vec3(0.0f);
         newMaterial.double_sided = p.value("DOUBLE_SIDED", false) ? 1 : 0;
-        newMaterial.hasRefractive = 0;
-        newMaterial.indexOfRefraction = 1.0f;
+        newMaterial.hasRefractive =
+            (p.value("REFRACTIVE", false) ||
+             p.value("HAS_REFRACTIVE", false))
+                ? 1
+                : 0;
+        newMaterial.indexOfRefraction =
+            p.value("IOR", p.value("ETA", 1.0f));
 
         if (p["TYPE"] == "Diffuse")
         {
@@ -185,6 +264,10 @@ void Scene::loadFromJSON(const std::string& jsonName)
             {
                 newMaterial.roughness_factor = 0.0f;
             }
+        }
+        else if (p["TYPE"] == "Refractive")
+        {
+            newMaterial.hasRefractive = 1;
         }
 
         if (p.contains("EMISSIVE_FACTOR"))
@@ -256,6 +339,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.up = glm::vec3(up[0], up[1], up[2]);
 
     finalizeCamera(state, fovy);
+    buildLightList();
     bvh.BuildBVH(this);
 }
 
@@ -465,13 +549,18 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
             (float)pbr.base_color_factor[1],
             (float)pbr.base_color_factor[2]);
         newMaterial.alpha = (float)pbr.base_color_factor[3];
-
-        newMaterial.is_metalic = pbr.metallic_factor > 0.0 ? 1 : 0;
-        if (pbr.metallic_roughness_texture.index < 0 &&
-            pbr.metallic_factor == 1.0)
+        newMaterial.alphaMode = ALPHA_MODE_OPAQUE;
+        if (tg3StrEquals(mat.alpha_mode, "MASK"))
         {
-            newMaterial.is_metalic = 0;
+            newMaterial.alphaMode = ALPHA_MODE_MASK;
         }
+        else if (tg3StrEquals(mat.alpha_mode, "BLEND"))
+        {
+            newMaterial.alphaMode = ALPHA_MODE_BLEND;
+        }
+        newMaterial.alphaCutoff = (float)mat.alpha_cutoff;
+
+        newMaterial.is_metalic = 0;
         newMaterial.roughness_factor = (float)pbr.roughness_factor;
 
         newMaterial.emissive_factor = glm::vec3(
@@ -505,6 +594,8 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         Material defaultMaterial{};
         defaultMaterial.color = glm::vec3(1.0f);
         defaultMaterial.alpha = 1.0f;
+        defaultMaterial.alphaMode = ALPHA_MODE_OPAQUE;
+        defaultMaterial.alphaCutoff = 0.5f;
         defaultMaterial.is_metalic = 0;
         defaultMaterial.roughness_factor = 1.0f;
         defaultMaterial.emissive_factor = glm::vec3(0.0f);
@@ -771,6 +862,9 @@ static void parse_primitive_geometry(const tg3_model& model,
         }
 
         Triangle triangle{};
+        triangle.tangentSign0 = 1.0f;
+        triangle.tangentSign1 = 1.0f;
+        triangle.tangentSign2 = 1.0f;
         triangle.v0 = glm::vec3(worldTransform * glm::vec4(positions[0], 1.0f));
         triangle.v1 = glm::vec3(worldTransform * glm::vec4(positions[1], 1.0f));
         triangle.v2 = glm::vec3(worldTransform * glm::vec4(positions[2], 1.0f));
@@ -823,6 +917,9 @@ static void parse_primitive_geometry(const tg3_model& model,
                                              glm::vec3(tangents[1]));
                 triangle.t2 = glm::normalize(vectorTransform *
                                              glm::vec3(tangents[2]));
+                triangle.tangentSign0 = tangents[0].w < 0.0f ? -1.0f : 1.0f;
+                triangle.tangentSign1 = tangents[1].w < 0.0f ? -1.0f : 1.0f;
+                triangle.tangentSign2 = tangents[2].w < 0.0f ? -1.0f : 1.0f;
             }
         }
 
@@ -867,6 +964,9 @@ static void parse_primitive_geometry(const tg3_model& model,
             triangle.t0 = tangent;
             triangle.t1 = tangent;
             triangle.t2 = tangent;
+            triangle.tangentSign0 = 1.0f;
+            triangle.tangentSign1 = 1.0f;
+            triangle.tangentSign2 = 1.0f;
         }
 
         triangle.materialid = materialId;
@@ -1004,7 +1104,9 @@ void Scene::loadFromGltf(const std::string &gltfName) {
     materials.clear();
     triangles.clear();
     textures.clear();
+    geoms.clear();
     appendGltfFile(gltfName, glm::mat4(1.0f), materials, triangles, textures);
     setupDefaultGltfCamera(state, triangles, gltfName);
+    buildLightList();
     bvh.BuildBVH(this);
 }

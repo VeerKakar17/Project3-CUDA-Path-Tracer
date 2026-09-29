@@ -94,6 +94,7 @@ static Geom *dev_geoms = NULL;
 static Triangle *dev_triangles = NULL;
 static Material *dev_materials = NULL;
 static DeviceTexture *dev_textures = NULL;
+static SceneLight *dev_lights = NULL;
 static BVHNode *dev_bvh = NULL;
 static PathSegment *dev_paths = NULL;
 static PathSegment *dev_paths_tmp = NULL;
@@ -135,9 +136,12 @@ void pathtraceInit(Scene *scene) {
   cudaMemcpy(dev_geoms, scene->geoms.data(), scene->geoms.size() * sizeof(Geom),
              cudaMemcpyHostToDevice);
 
-  cudaMalloc(&dev_triangles, scene->triangles.size() * sizeof(Triangle));
-  cudaMemcpy(dev_triangles, scene->triangles.data(), scene->triangles.size() * sizeof(Triangle),
-             cudaMemcpyHostToDevice);
+  if (!scene->triangles.empty()) {
+    cudaMalloc(&dev_triangles, scene->triangles.size() * sizeof(Triangle));
+    cudaMemcpy(dev_triangles, scene->triangles.data(),
+               scene->triangles.size() * sizeof(Triangle),
+               cudaMemcpyHostToDevice);
+  }
 
   cudaMalloc(&dev_materials, scene->materials.size() * sizeof(Material));
   cudaMemcpy(dev_materials, scene->materials.data(),
@@ -170,8 +174,19 @@ void pathtraceInit(Scene *scene) {
                cudaMemcpyHostToDevice);
   }
 
-  cudaMalloc(&dev_bvh, scene->bvh.nodes.size() * sizeof(BVHNode));
-  cudaMemcpy(dev_bvh, scene->bvh.nodes.data(), scene->bvh.nodes.size() * sizeof(BVHNode), cudaMemcpyHostToDevice);
+  if (!scene->lights.empty()) {
+    cudaMalloc(&dev_lights, scene->lights.size() * sizeof(SceneLight));
+    cudaMemcpy(dev_lights, scene->lights.data(),
+               scene->lights.size() * sizeof(SceneLight),
+               cudaMemcpyHostToDevice);
+  }
+
+  if (!scene->bvh.nodes.empty()) {
+    cudaMalloc(&dev_bvh, scene->bvh.nodes.size() * sizeof(BVHNode));
+    cudaMemcpy(dev_bvh, scene->bvh.nodes.data(),
+               scene->bvh.nodes.size() * sizeof(BVHNode),
+               cudaMemcpyHostToDevice);
+  }
 
   cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
   cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
@@ -213,6 +228,8 @@ void pathtraceFree() {
   hst_device_textures.clear();
   cudaFree(dev_textures);
   dev_textures = NULL;
+  cudaFree(dev_lights);
+  dev_lights = NULL;
   cudaFree(dev_intersections);
   cudaFree(dev_intersections_tmp);
   cudaFree(dev_firstThreadIdx);
@@ -241,7 +258,11 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     PathSegment &segment = pathSegments[index];
 
     segment.ray.origin = cam.position;
-    segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
+    segment.radiance = glm::vec3(0.0f);
+    segment.throughput = glm::vec3(1.0f);
+    segment.etaScale = 1.0f;
+    segment.lastBsdfPdf = 0.0f;
+    segment.lastBounceWasSpecular = true;
 
     // TODO: implement antialiasing by jittering the ray
 
@@ -298,7 +319,8 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
                              int triangles_size, BVHNode *bvh, float &tMin,
                              glm::vec3 &intersectPoint, glm::vec3 &normal,
                              int &materialId, glm::vec2 &uv,
-                             glm::vec3 &tangent) {
+                             glm::vec3 &tangent, float &tangentSign,
+                             int &hitTriangleId) {
   bool hit = false;
   int nodeIdx = 0;
   constexpr int STACK_SIZE = 128;
@@ -319,10 +341,11 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
         glm::vec3 tmpNormal;
         glm::vec2 tmpUv;
         glm::vec3 tmpTangent;
+        float tmpTangentSign = 1.0f;
         bool outside = true;
         float t = triangleIntersectionTest(triangles[triangleIdx], ray,
                                            tmpIntersect, tmpNormal, outside,
-                                           tmpUv, tmpTangent);
+                                           tmpUv, tmpTangent, tmpTangentSign);
         if (t > 0.0f && t < tMin) {
           hit = true;
           tMin = t;
@@ -331,6 +354,8 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
           materialId = triangles[triangleIdx].materialid;
           uv = tmpUv;
           tangent = tmpTangent;
+          tangentSign = tmpTangentSign;
+          hitTriangleId = triangleIdx;
         }
       }
 
@@ -372,6 +397,10 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
   return hit;
 }
 
+__device__ glm::vec3 environmentColor(glm::vec3 &dir) {
+    return glm::vec3(0.3f, 0.3f, 0.3f);
+}
+
 __global__ void computeIntersections(int depth, int num_paths,
                                      PathSegment *pathSegments, Geom *geoms,
                                      int geoms_size, Triangle *triangles,
@@ -389,6 +418,7 @@ __global__ void computeIntersections(int depth, int num_paths,
       glm::vec3 normal;
       float t_min = FLT_MAX;
       int hit_geom_index = -1;
+      int hit_triangle_index = -1;
       int hit_material_id = -1;
       bool outside = true;
 
@@ -396,6 +426,8 @@ __global__ void computeIntersections(int depth, int num_paths,
       glm::vec3 tmp_normal;
       glm::vec3 hit_tangent(0.0f);
       glm::vec3 tmp_tangent(0.0f);
+      float hit_tangent_sign = 1.0f;
+      float tmp_tangent_sign = 1.0f;
       glm::vec2 hit_uv(0.0f);
       glm::vec2 tmp_uv(0.0f);
 
@@ -422,25 +454,31 @@ __global__ void computeIntersections(int depth, int num_paths,
           intersect_point = tmp_intersect;
           normal = tmp_normal;
           hit_tangent = glm::vec3(0.0f);
+          hit_tangent_sign = 1.0f;
+          hit_triangle_index = -1;
         }
       }
 
-      if (BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
+      if (triangles_size > 0 && bvh != NULL &&
+          BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
                        tmp_intersect, tmp_normal, hit_material_id, tmp_uv,
-                       tmp_tangent)) {
+                       tmp_tangent, tmp_tangent_sign, hit_triangle_index)) {
         hit_geom_index = -1;
         intersect_point = tmp_intersect;
         normal = tmp_normal;
         hit_uv = tmp_uv;
         hit_tangent = tmp_tangent;
+        hit_tangent_sign = tmp_tangent_sign;
       }
 
       if (hit_material_id == -1) {
         intersections[path_index].t = -1.0f;
         intersections[path_index].geomId = -1;
+        intersections[path_index].triangleId = -1;
         intersections[path_index].uv = glm::vec2(0.0f);
         intersections[path_index].surfaceTangent = glm::vec3(0.0f);
-        pathSegment.color = glm::vec3(0);
+        intersections[path_index].tangentSign = 1.0f;
+        pathSegment.radiance += pathSegment.throughput * environmentColor(pathSegment.ray.direction);
         pathSegment.remainingBounces = 0;
         if (orderedPathSegments != NULL) {
           orderedPathSegments[pathSegment.pixelIndex] = pathSegment;
@@ -450,8 +488,10 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].t = t_min;
         intersections[path_index].materialId = hit_material_id;
         intersections[path_index].geomId = hit_geom_index;
+        intersections[path_index].triangleId = hit_triangle_index;
         intersections[path_index].surfaceNormal = normal;
         intersections[path_index].surfaceTangent = hit_tangent;
+        intersections[path_index].tangentSign = hit_tangent_sign;
         intersections[path_index].uv = hit_uv;
       }
     }
@@ -460,6 +500,19 @@ __global__ void computeIntersections(int depth, int num_paths,
 
 __device__ float saturateFloat(float value) {
   return fminf(fmaxf(value, 0.0f), 1.0f);
+}
+
+__device__ float srgbToLinearFloat(float value) {
+  value = saturateFloat(value);
+  if (value <= 0.04045f) {
+    return value / 12.92f;
+  }
+  return powf((value + 0.055f) / 1.055f, 2.4f);
+}
+
+__device__ glm::vec3 srgbToLinear(glm::vec3 value) {
+  return glm::vec3(srgbToLinearFloat(value.r), srgbToLinearFloat(value.g),
+                   srgbToLinearFloat(value.b));
 }
 
 __device__ glm::vec4 sample_texture(DeviceTexture *textures, int textures_size,
@@ -523,7 +576,8 @@ __device__ glm::vec3 apply_normal_texture(DeviceTexture *textures,
     tangent = glm::normalize(tangent - normal * glm::dot(normal, tangent));
   }
 
-  glm::vec3 bitangent = glm::normalize(glm::cross(normal, tangent));
+  float tangentSign = hit.tangentSign < 0.0f ? -1.0f : 1.0f;
+  glm::vec3 bitangent = tangentSign * glm::normalize(glm::cross(normal, tangent));
   glm::vec3 sampled =
       glm::vec3(sample_texture(textures, textures_size, material.normalTexId,
                                hit.uv)) *
@@ -538,9 +592,16 @@ __global__ void computeRayColors(int iter, int num_paths,
                                  ShadeableIntersection *shadeableIntersections,
                                  PathSegment *pathSegments,
                                  Geom *geoms,
+                                 int geoms_size,
+                                 Triangle *triangles,
+                                 int triangles_size,
                                  Material *materials,
+                                 int materials_size,
+                                 BVHNode *bvh,
                                  DeviceTexture *textures,
                                  int textures_size,
+                                 SceneLight *lights,
+                                 int lights_size,
                                  PathSegment *orderedPathSegments) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_paths) {
@@ -554,8 +615,12 @@ __global__ void computeRayColors(int iter, int num_paths,
             glm::vec4 baseColorSample =
                 sample_texture(textures, textures_size, material.baseColorTexId,
                                intersection.uv);
-            glm::vec3 baseColor = material.color * glm::vec3(baseColorSample);
-            float alpha = material.alpha * baseColorSample.a;
+            glm::vec3 baseColor =
+                material.color * srgbToLinear(glm::vec3(baseColorSample));
+            float alpha = 1.0f;
+            if (material.alphaMode != ALPHA_MODE_OPAQUE) {
+                alpha = material.alpha * baseColorSample.a;
+            }
 
             float roughness = material.roughness_factor;
             if (material.metallicRoughnessTexId >= 0) {
@@ -567,9 +632,10 @@ __global__ void computeRayColors(int iter, int num_paths,
 
             glm::vec3 emission = material.emissive_factor;
             if (material.emissiveTexId >= 0) {
-                emission *= glm::vec3(sample_texture(
+                glm::vec4 emissiveSample = sample_texture(
                     textures, textures_size, material.emissiveTexId,
-                    intersection.uv));
+                    intersection.uv);
+                emission *= srgbToLinear(glm::vec3(emissiveSample));
             }
 
             Material sampledMaterial = material;
@@ -588,8 +654,13 @@ __global__ void computeRayColors(int iter, int num_paths,
             glm::vec3 intersect_point = getPointOnRay(segment->ray, intersection.t);
 
             thrust::uniform_real_distribution<float> u01(0, 1);
-            if (sampledMaterial.alpha < 1.0f &&
-                u01(rng) > sampledMaterial.alpha) {
+            bool skipAlphaHit =
+                sampledMaterial.alphaMode == ALPHA_MODE_MASK
+                    ? sampledMaterial.alpha < sampledMaterial.alphaCutoff
+                    : sampledMaterial.alphaMode == ALPHA_MODE_BLEND &&
+                          sampledMaterial.alpha < 1.0f &&
+                          u01(rng) > sampledMaterial.alpha;
+            if (skipAlphaHit) {
                 glm::vec3 rayDir = glm::normalize(segment->ray.direction);
                 segment->ray.origin = intersect_point + 0.0002f * rayDir;
                 if (intersection.geomId >= 0) {
@@ -621,18 +692,28 @@ __global__ void computeRayColors(int iter, int num_paths,
                 return;
             }
 
-            float scatterMultiplier =
-                scatterRay(*segment, intersect_point, surfaceNormal,
-                           sampledMaterial, rng);
             if (sampledMaterial.is_emissive) {
-                segment->color *= sampledMaterial.emissive_factor;
+                glm::vec3 emissionContribution = evaluateEmissiveHit(
+                    *segment, intersect_point, surfaceNormal,
+                    intersection.triangleId, sampledMaterial, lights,
+                    lights_size, triangles, triangles_size);
+                segment->radiance += segment->throughput * emissionContribution;
                 segment->remainingBounces = 0;
             } else {
-                float cos_angle = glm::dot(surfaceNormal, old_dir);
-                segment->color *= sampledMaterial.color * scatterMultiplier;
+                ScatterResult scatter =
+                    scatterRay(*segment, intersect_point, surfaceNormal,
+                               sampledMaterial, lights, lights_size, geoms,
+                               geoms_size, triangles, triangles_size, bvh,
+                               materials, materials_size, rng);
+                segment->radiance += segment->throughput * scatter.contribution;
+                segment->throughput *= scatter.throughputMultiplier;
+                segment->lastBsdfPdf = scatter.pdf;
+                segment->lastBounceWasSpecular = scatter.wasSpecular;
             }
 
-            segment->remainingBounces--;
+            if (segment->remainingBounces > 0) {
+                segment->remainingBounces--;
+            }
             if (orderedPathSegments != NULL) {
               orderedPathSegments[segment->pixelIndex] = *segment;
             }
@@ -671,7 +752,7 @@ __global__ void finalGather(int nPaths, glm::vec3 *image,
 
   if (index < nPaths) {
     PathSegment iterationPath = iterationPaths[index];
-    image[iterationPath.pixelIndex] += iterationPath.color;
+    image[iterationPath.pixelIndex] += iterationPath.radiance;
   }
 }
 
@@ -835,7 +916,9 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
 
     computeRayColors<<<numblocksPathSegmentTracing, blockSize1d>>>(
         iter, n, dev_active_intersections, dev_active_paths, dev_geoms,
-        dev_materials, dev_textures, hst_scene->textures.size(),
+        hst_scene->geoms.size(), dev_triangles, hst_scene->triangles.size(),
+        dev_materials, hst_scene->materials.size(), dev_bvh, dev_textures,
+        hst_scene->textures.size(), dev_lights, hst_scene->lights.size(),
         SORT_BY_MATERIAL ? NULL : dev_paths);
 
     if (guiData != NULL) {

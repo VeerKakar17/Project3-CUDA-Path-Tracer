@@ -8,8 +8,6 @@
 #include <string>
 #include <vector>
 
-#define BACKGROUND_COLOR (glm::vec3(0.0f))
-
 enum GeomType
 {
     SPHERE,
@@ -38,15 +36,25 @@ struct Triangle {
     glm::vec3 v0, v1, v2;
     glm::vec3 n0, n1, n2;
     glm::vec3 t0, t1, t2;
+    float tangentSign0, tangentSign1, tangentSign2;
     glm::vec2 uv0, uv1, uv2;
     glm::vec3 centroid;
     int materialid;
+};
+
+enum AlphaMode : uint8_t
+{
+    ALPHA_MODE_OPAQUE = 0,
+    ALPHA_MODE_MASK = 1,
+    ALPHA_MODE_BLEND = 2
 };
 
 struct Material
 {
     glm::vec3 color;
     float alpha;
+    uint8_t alphaMode;
+    float alphaCutoff;
 
     uint8_t is_metalic;
     float roughness_factor;
@@ -71,7 +79,8 @@ struct Material
     int normalTexId;
 
     Material() : emissiveTexId(-1), normalTexId(-1), baseColorTexId(-1), metallicRoughnessTexId(-1),
-        hasRefractive(0), is_emissive(0), is_metalic(0) {}
+        hasRefractive(0), is_emissive(0), is_metalic(0),
+        alphaMode(ALPHA_MODE_OPAQUE), alphaCutoff(0.5f) {}
 };
 
 struct Texture {
@@ -86,6 +95,51 @@ struct DeviceTexture {
     int height;
     int channels;
     uchar4 *pixels;
+};
+
+enum SceneLightType : uint8_t
+{
+    SCENE_LIGHT_TRIANGLE = 0,
+    SCENE_LIGHT_GEOM = 1
+};
+
+struct SceneLight
+{
+    uint8_t type;
+    int id;
+};
+
+struct LightSample
+{
+    SceneLight light;
+    int lightIndex;
+    float lightPickPdf;
+    bool valid;
+};
+
+struct LightPointSample
+{
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec3 barycentric;
+    int materialId;
+    float pdfArea;
+    bool valid;
+};
+
+struct NeeSample
+{
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec3 wi;
+    glm::vec3 Li;
+    float distance;
+    float pdfArea;
+    float pdfDirectional;
+    float pdfLight;
+    int lightIndex;
+    int materialId;
+    bool valid;
 };
 
 struct Camera
@@ -112,9 +166,17 @@ struct RenderState
 struct PathSegment
 {
     Ray ray;
-    glm::vec3 color;
+
+    glm::vec3 radiance;
+    glm::vec3 throughput;
+
     int pixelIndex;
     int remainingBounces;
+
+    float etaScale;
+
+    float lastBsdfPdf;
+    bool lastBounceWasSpecular;
 };
 
 // Use with a corresponding PathSegment to do:
@@ -125,7 +187,9 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   glm::vec3 surfaceTangent;
+  float tangentSign;
   int materialId;
   int geomId;
+  int triangleId;
   glm::vec2 uv;
 };

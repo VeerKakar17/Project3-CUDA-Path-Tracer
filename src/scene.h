@@ -11,6 +11,7 @@ class Scene
 private:
     void loadFromJSON(const std::string& jsonName);
     void loadFromGltf(const std::string& gltfName);
+    void buildLightList();
 public:
     Scene(std::string filename);
 
@@ -18,6 +19,7 @@ public:
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
     std::vector<Texture> textures;
+    std::vector<SceneLight> lights;
     BVH bvh;
     RenderState state;
 };
