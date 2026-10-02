@@ -64,6 +64,7 @@ __device__ ScatterResult scatterRay(
     PathSegment& pathSegment,
     glm::vec3 intersect,
     glm::vec3 normal,
+    bool outside,
     const Material& m,
     SceneLight* lights,
     int lights_size,

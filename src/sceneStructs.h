@@ -56,7 +56,7 @@ struct Material
     uint8_t alphaMode;
     float alphaCutoff;
 
-    uint8_t is_metalic;
+    float metalic_factor;
     float roughness_factor;
 
     struct
@@ -70,7 +70,7 @@ struct Material
 
     uint8_t double_sided; // For if we cull back faces
 
-    uint8_t hasRefractive;
+    float transmission_factor;
     float indexOfRefraction;
 
     int baseColorTexId;
@@ -78,8 +78,10 @@ struct Material
     int emissiveTexId;
     int normalTexId;
 
-    Material() : emissiveTexId(-1), normalTexId(-1), baseColorTexId(-1), metallicRoughnessTexId(-1),
-        hasRefractive(0), is_emissive(0), is_metalic(0),
+    Material() : metalic_factor(0.0f), roughness_factor(1.0f),
+        is_emissive(0), double_sided(0), transmission_factor(0.0f),
+        indexOfRefraction(1.0f), emissiveTexId(-1), normalTexId(-1),
+        baseColorTexId(-1), metallicRoughnessTexId(-1),
         alphaMode(ALPHA_MODE_OPAQUE), alphaCutoff(0.5f) {}
 };
 
@@ -191,5 +193,6 @@ struct ShadeableIntersection
   int materialId;
   int geomId;
   int triangleId;
+  uint8_t outside;
   glm::vec2 uv;
 };

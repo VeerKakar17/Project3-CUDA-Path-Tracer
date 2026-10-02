@@ -21,7 +21,7 @@
 #include "utilities.h"
 
 #define ERRORCHECK 1
-static constexpr bool SORT_BY_MATERIAL = false;
+static constexpr bool SORT_BY_MATERIAL = true;
 
 #define FILENAME                                                               \
   (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -320,7 +320,7 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
                              glm::vec3 &intersectPoint, glm::vec3 &normal,
                              int &materialId, glm::vec2 &uv,
                              glm::vec3 &tangent, float &tangentSign,
-                             int &hitTriangleId) {
+                             int &hitTriangleId, bool &hitOutside) {
   bool hit = false;
   int nodeIdx = 0;
   constexpr int STACK_SIZE = 128;
@@ -356,6 +356,7 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
           tangent = tmpTangent;
           tangentSign = tmpTangentSign;
           hitTriangleId = triangleIdx;
+          hitOutside = outside;
         }
       }
 
@@ -398,7 +399,7 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
 }
 
 __device__ glm::vec3 environmentColor(glm::vec3 &dir) {
-    return glm::vec3(0.3f, 0.3f, 0.3f);
+    return glm::vec3(0.0f, 0.0f, 0.0f);
 }
 
 __global__ void computeIntersections(int depth, int num_paths,
@@ -421,6 +422,7 @@ __global__ void computeIntersections(int depth, int num_paths,
       int hit_triangle_index = -1;
       int hit_material_id = -1;
       bool outside = true;
+      bool hit_outside = true;
 
       glm::vec3 tmp_intersect;
       glm::vec3 tmp_normal;
@@ -456,13 +458,15 @@ __global__ void computeIntersections(int depth, int num_paths,
           hit_tangent = glm::vec3(0.0f);
           hit_tangent_sign = 1.0f;
           hit_triangle_index = -1;
+          hit_outside = outside;
         }
       }
 
       if (triangles_size > 0 && bvh != NULL &&
           BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
                        tmp_intersect, tmp_normal, hit_material_id, tmp_uv,
-                       tmp_tangent, tmp_tangent_sign, hit_triangle_index)) {
+                       tmp_tangent, tmp_tangent_sign, hit_triangle_index,
+                       hit_outside)) {
         hit_geom_index = -1;
         intersect_point = tmp_intersect;
         normal = tmp_normal;
@@ -478,6 +482,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].uv = glm::vec2(0.0f);
         intersections[path_index].surfaceTangent = glm::vec3(0.0f);
         intersections[path_index].tangentSign = 1.0f;
+        intersections[path_index].outside = 1;
         pathSegment.radiance += pathSegment.throughput * environmentColor(pathSegment.ray.direction);
         pathSegment.remainingBounces = 0;
         if (orderedPathSegments != NULL) {
@@ -493,6 +498,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].surfaceTangent = hit_tangent;
         intersections[path_index].tangentSign = hit_tangent_sign;
         intersections[path_index].uv = hit_uv;
+        intersections[path_index].outside = hit_outside ? 1 : 0;
       }
     }
   }
@@ -702,9 +708,10 @@ __global__ void computeRayColors(int iter, int num_paths,
             } else {
                 ScatterResult scatter =
                     scatterRay(*segment, intersect_point, surfaceNormal,
-                               sampledMaterial, lights, lights_size, geoms,
-                               geoms_size, triangles, triangles_size, bvh,
-                               materials, materials_size, rng);
+                               intersection.outside != 0, sampledMaterial,
+                               lights, lights_size, geoms, geoms_size,
+                               triangles, triangles_size, bvh, materials,
+                               materials_size, rng);
                 segment->radiance += segment->throughput * scatter.contribution;
                 segment->throughput *= scatter.throughputMultiplier;
                 segment->lastBsdfPdf = scatter.pdf;

@@ -7,7 +7,7 @@
 
 #include <thrust/random.h>
 
-#define REMAP_ROUGHNESS 0
+#define REMAP_ROUGHNESS 1
 #define SHADOW_RAY_EPSILON 0.0002f
 
 __device__ float power_heuristic(float pdfA, float pdfB) {
@@ -15,6 +15,46 @@ __device__ float power_heuristic(float pdfA, float pdfB) {
     float pdfB2 = pdfB * pdfB;
     float denom = pdfA2 + pdfB2;
     return denom > 0.0f ? pdfA2 / denom : 0.0f;
+}
+
+__device__ float fresnel_dielectric(float cosThetaI, float etaI, float etaT) {
+    cosThetaI = fminf(fmaxf(cosThetaI, -1.0f), 1.0f);
+    if (cosThetaI < 0.0f) {
+        float temp = etaI;
+        etaI = etaT;
+        etaT = temp;
+        cosThetaI = -cosThetaI;
+    }
+
+    float sinThetaI = sqrtf(fmaxf(0.0f, 1.0f - cosThetaI * cosThetaI));
+    float sinThetaT = etaI / etaT * sinThetaI;
+    if (sinThetaT >= 1.0f) {
+        return 1.0f;
+    }
+
+    float cosThetaT = sqrtf(fmaxf(0.0f, 1.0f - sinThetaT * sinThetaT));
+    float rParallel = ((etaT * cosThetaI) - (etaI * cosThetaT)) /
+                      ((etaT * cosThetaI) + (etaI * cosThetaT));
+    float rPerp = ((etaI * cosThetaI) - (etaT * cosThetaT)) /
+                  ((etaI * cosThetaI) + (etaT * cosThetaT));
+    return 0.5f * (rParallel * rParallel + rPerp * rPerp);
+}
+
+__device__ float material_alpha(const Material& m) {
+    float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
+#if REMAP_ROUGHNESS
+    alpha = alpha * alpha;
+#endif
+    return alpha;
+}
+
+__device__ void material_lobe_weights(const Material& m,
+                                      float& wDiffuse,
+                                      float& wMetal,
+                                      float& wTransmission) {
+    wMetal = m.metalic_factor;
+    wTransmission = (1.0f - wMetal) * m.transmission_factor;
+    wDiffuse = (1.0f - wMetal) * (1.0f - m.transmission_factor);
 }
 
 __host__ __device__ glm::vec3
@@ -82,6 +122,8 @@ __device__ bool shadow_bvh_occluded(const Ray& shadowRay,
                                     Triangle* triangles,
                                     int triangles_size,
                                     BVHNode* bvh,
+                                    Material* materials,
+                                    int materials_size,
                                     float maxDistance) {
     if (triangles == nullptr || triangles_size <= 0 || bvh == nullptr) {
         return false;
@@ -99,6 +141,11 @@ __device__ bool shadow_bvh_occluded(const Ray& shadowRay,
             for (uint32_t i = 0; i < node.triCount; ++i) {
                 int triangleIdx = (int)(node.firstTriIdx + i);
                 if (triangleIdx >= triangles_size) {
+                    continue;
+                }
+                int materialId = triangles[triangleIdx].materialid;
+                if (materialId >= 0 && materialId < materials_size &&
+                    materials[materialId].transmission_factor > 0.0f) {
                     continue;
                 }
 
@@ -159,7 +206,9 @@ __device__ bool shadow_ray_visible(const glm::vec3& origin,
                                    int geoms_size,
                                    Triangle* triangles,
                                    int triangles_size,
-                                   BVHNode* bvh) {
+                                   BVHNode* bvh,
+                                   Material* materials,
+                                   int materials_size) {
     float maxDistance = neeSample.distance - 2.0f * SHADOW_RAY_EPSILON;
     if (maxDistance <= SHADOW_RAY_EPSILON) {
         return false;
@@ -171,6 +220,10 @@ __device__ bool shadow_ray_visible(const glm::vec3& origin,
 
     for (int i = 0; i < geoms_size; ++i) {
         Geom& geom = geoms[i];
+        if (geom.materialid >= 0 && geom.materialid < materials_size &&
+            materials[geom.materialid].transmission_factor > 0.0f) {
+            continue;
+        }
         glm::vec3 intersectPoint;
         glm::vec3 normal;
         bool outside = true;
@@ -189,55 +242,74 @@ __device__ bool shadow_ray_visible(const glm::vec3& origin,
     }
 
     return !shadow_bvh_occluded(shadowRay, triangles, triangles_size, bvh,
-                                maxDistance);
+                                materials, materials_size, maxDistance);
 }
 
 __device__ glm::vec3 evaluate_bsdf_for_direction(
     const Material& m,
     const glm::vec3& woWorld,
     const glm::vec3& wiWorld,
-    const glm::vec3& normal) {
-    if (m.is_metalic) {
-        if (m.roughness_factor < 0.001f) {
-            return glm::vec3(0.0f);
-        }
+    const glm::vec3& normal,
+    bool outside) {
+    bool smooth = m.roughness_factor <= 0.001f;
+    float wDiffuse;
+    float wMetal;
+    float wTransmission;
+    material_lobe_weights(m, wDiffuse, wMetal, wTransmission);
 
-        float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
-#if REMAP_ROUGHNESS
-        alpha = alpha * alpha;
-#endif
-        return Microfacet::evaluate_brdf(woWorld, wiWorld, normal, m, alpha);
+    glm::vec3 value(0.0f);
+    if (wDiffuse > 0.0f && glm::dot(normal, woWorld) > 0.0f &&
+        glm::dot(normal, wiWorld) > 0.0f) {
+        value += wDiffuse * m.color / PI;
     }
 
-    if (glm::dot(normal, woWorld) <= 0.0f ||
-        glm::dot(normal, wiWorld) <= 0.0f) {
-        return glm::vec3(0.0f);
+    if (!smooth && wMetal > 0.0f) {
+        value += wMetal *
+                 Microfacet::evaluate_brdf(woWorld, wiWorld, normal, m,
+                                            material_alpha(m));
     }
-    return m.color / PI;
+
+    if (!smooth && wTransmission > 0.0f) {
+        value += wTransmission *
+                 Microfacet::evaluate_dielectric_bsdf(
+                     woWorld, wiWorld, normal, m, outside,
+                     material_alpha(m));
+    }
+
+    return value;
 }
 
 __device__ float evaluate_bsdf_pdf_for_direction(
     const Material& m,
     const glm::vec3& woWorld,
     const glm::vec3& wiWorld,
-    const glm::vec3& normal) {
-    if (m.is_metalic) {
-        if (m.roughness_factor < 0.001f) {
-            return 0.0f;
-        }
+    const glm::vec3& normal,
+    bool outside) {
+    bool smooth = m.roughness_factor <= 0.001f;
+    float wDiffuse;
+    float wMetal;
+    float wTransmission;
+    material_lobe_weights(m, wDiffuse, wMetal, wTransmission);
 
-        float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
-#if REMAP_ROUGHNESS
-        alpha = alpha * alpha;
-#endif
-        return Microfacet::evaluate_pdf(woWorld, wiWorld, normal, alpha);
+    float pdf = 0.0f;
+    if (wDiffuse > 0.0f && glm::dot(normal, woWorld) > 0.0f &&
+        glm::dot(normal, wiWorld) > 0.0f) {
+        pdf += wDiffuse * fmaxf(glm::dot(normal, wiWorld), 0.0f) / PI;
     }
 
-    if (glm::dot(normal, woWorld) <= 0.0f ||
-        glm::dot(normal, wiWorld) <= 0.0f) {
-        return 0.0f;
+    if (!smooth && wMetal > 0.0f) {
+        pdf += wMetal * Microfacet::evaluate_pdf(
+                            woWorld, wiWorld, normal, material_alpha(m));
     }
-    return fmaxf(glm::dot(normal, wiWorld), 0.0f) / PI;
+
+    if (!smooth && wTransmission > 0.0f) {
+        pdf += wTransmission *
+               Microfacet::evaluate_dielectric_pdf(
+                   woWorld, wiWorld, normal, m, outside,
+                   material_alpha(m));
+    }
+
+    return pdf;
 }
 
 __device__ glm::vec3 evaluateEmissiveHit(
@@ -263,8 +335,139 @@ __device__ glm::vec3 evaluateEmissiveHit(
     return misWeight * lightMaterial.emissive_factor;
 }
 
+__device__ ScatterResult empty_scatter_result() {
+    ScatterResult result;
+    result.throughputMultiplier = glm::vec3(0.0f);
+    result.contribution = glm::vec3(0.0f);
+    result.pdf = 0.0f;
+    result.wasSpecular = false;
+    return result;
+}
+
+__device__ ScatterResult calculate_reflection(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    const Material& m,
+    bool pureDeltaMetal,
+    const glm::vec3& sampledWm,
+    thrust::default_random_engine& rng)
+{
+    ScatterResult result = empty_scatter_result();
+
+    if (pureDeltaMetal) {
+        pathSegment.ray.direction = glm::reflect(pathSegment.ray.direction, normal);
+        pathSegment.ray.origin = intersect;
+        result.throughputMultiplier = m.color;
+        result.pdf = 1.0f;
+        result.wasSpecular = true;
+        return result;
+    }
+
+    float alpha = m.roughness_factor * m.roughness_factor;
+
+    ScatterResult sampledResult =
+        Microfacet::get_brdf_result(pathSegment, intersect, normal, m,
+                                    alpha, sampledWm, rng);
+    return sampledResult;
+}
+
+__device__ ScatterResult calculate_transmission(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    bool outside,
+    const Material& m,
+    bool smooth,
+    glm::vec3 woWorld,
+    const glm::vec3& sampledWm,
+    thrust::default_random_engine& rng)
+{
+    ScatterResult result = empty_scatter_result();
+    glm::vec3 n = smooth ? normal : sampledWm;
+    if (glm::dot(woWorld, n) < 0.0f) {
+        n = -n;
+    }
+
+    glm::vec3 rayDir = glm::normalize(pathSegment.ray.direction);
+    float ior = fmaxf(m.indexOfRefraction, 1.0001f);
+    float etaI = outside ? 1.0f : ior;
+    float etaT = outside ? ior : 1.0f;
+    float etaP = etaT / etaI;
+
+    float cosThetaO = fminf(fmaxf(glm::dot(woWorld, n), 0.0f), 1.0f);
+    float R = fresnel_dielectric(cosThetaO, etaI, etaT);
+    float T = 1.0f - R;
+
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    float random = u01(rng);
+    glm::vec3 wi;
+
+    bool sampledReflection = random < R;
+    if (sampledReflection) {
+        wi = glm::reflect(rayDir, n);
+        result.pdf = R;
+    } else {
+        wi = glm::refract(rayDir, n, etaI / etaT);
+        if (glm::dot(wi, wi) <= 0.0f) {
+            return result;
+        }
+        result.pdf = T;
+    }
+
+    if (!smooth) {
+        glm::vec3 wiWorld = glm::normalize(wi);
+        float macroCosThetaI = glm::dot(normal, wiWorld);
+        if ((sampledReflection && macroCosThetaI <= 0.0f) ||
+            (!sampledReflection && macroCosThetaI >= 0.0f)) {
+            return result;
+        }
+
+        glm::vec3 bsdf = Microfacet::evaluate_dielectric_bsdf(
+            woWorld, wiWorld, normal, m, outside, material_alpha(m));
+        float pdf = Microfacet::evaluate_dielectric_pdf(
+            woWorld, wiWorld, normal, m, outside, material_alpha(m));
+        if (pdf <= 0.0f) {
+            return result;
+        }
+
+        float cosTheta = fabsf(glm::dot(normal, wiWorld));
+        result.throughputMultiplier = bsdf * cosTheta / pdf;
+        result.pdf = pdf;
+    } else {
+        result.throughputMultiplier = m.color;
+        if (random >= R) {
+            result.throughputMultiplier /= etaP * etaP;
+        }
+    }
+
+    pathSegment.ray.direction = glm::normalize(wi);
+    pathSegment.ray.origin =
+        intersect + SHADOW_RAY_EPSILON * pathSegment.ray.direction;
+    result.wasSpecular = smooth;
+
+    return result;
+}
+
+__device__ ScatterResult calculate_diffuse(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    const Material& m,
+    thrust::default_random_engine& rng)
+{
+    ScatterResult result = empty_scatter_result();
+    pathSegment.ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
+    pathSegment.ray.origin = intersect;
+    float cosTheta = fmaxf(glm::dot(normal, pathSegment.ray.direction), 0.0f);
+    result.throughputMultiplier = m.color;
+    result.pdf = cosTheta / PI;
+    return result;
+}
+
 __device__ ScatterResult scatterRay(PathSegment &pathSegment,
                                     glm::vec3 intersect, glm::vec3 normal,
+                                    bool outside,
                                     const Material &m,
                                     SceneLight *lights,
                                     int lights_size,
@@ -276,26 +479,55 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
                                     Material *materials,
                                     int materials_size,
                                     thrust::default_random_engine &rng) {
-    ScatterResult result;
-    result.throughputMultiplier = glm::vec3(0.0f);
-    result.contribution = glm::vec3(0.0f);
-    result.pdf = 0.0f;
-    result.wasSpecular = false;
+    const float materialEpsilon = 0.001f;
+    
+    ScatterResult result = empty_scatter_result();
 
     glm::vec3 woWorld = glm::normalize(-pathSegment.ray.direction);
-    bool isPerfectSpecular = m.is_metalic && m.roughness_factor < 0.001f;
-    if (!isPerfectSpecular) {
+    
+    bool smooth =
+        m.roughness_factor <= materialEpsilon;
+    float alpha = material_alpha(m);
+
+    bool pureMetal =
+        m.metalic_factor >= 1.0f - materialEpsilon;
+
+    bool pureGlass =
+        m.metalic_factor <= materialEpsilon &&
+        m.transmission_factor >= 1.0f - materialEpsilon;
+
+    bool pureDeltaMetal =
+        pureMetal && smooth;
+
+    bool pureDeltaGlass =
+        pureGlass && smooth;
+
+    bool doMIS =
+        !(pureDeltaMetal || pureDeltaGlass);
+
+    glm::vec3 sampledWm = normal;
+    if (!smooth && (m.metalic_factor > materialEpsilon ||
+                    m.transmission_factor > materialEpsilon)) {
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        glm::vec2 u(u01(rng), u01(rng));
+        sampledWm = Microfacet::sample_wm(alpha, normal, u);
+    }
+
+    // determine if do NEE + MIS if pure delta
+    if (doMIS) {
         NeeSample neeSample =
-            Nee::get_nee(intersect, normal, lights, lights_size, triangles,
+        Nee::get_nee(intersect, normal, lights, lights_size, triangles,
                          triangles_size, materials, materials_size, rng);
         if (neeSample.valid &&
             shadow_ray_visible(intersect, neeSample, geoms, geoms_size,
-                               triangles, triangles_size, bvh)) {
+                               triangles, triangles_size, bvh, materials,
+                               materials_size)) {
             glm::vec3 bsdf =
-                evaluate_bsdf_for_direction(m, woWorld, neeSample.wi, normal);
+                evaluate_bsdf_for_direction(m, woWorld, neeSample.wi, normal,
+                                            outside);
             float bsdfPdf =
                 evaluate_bsdf_pdf_for_direction(m, woWorld, neeSample.wi,
-                                                normal);
+                                                normal, outside);
             float cosSurface = fmaxf(glm::dot(normal, neeSample.wi), 0.0f);
             if (cosSurface > 0.0f && neeSample.pdfLight > 0.0f) {
                 float misWeight = power_heuristic(neeSample.pdfLight, bsdfPdf);
@@ -306,38 +538,74 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
         }
     }
 
-    if (m.is_metalic) {
-        if (m.roughness_factor < 0.001) {
-            pathSegment.ray.direction = glm::reflect(pathSegment.ray.direction, normal);
-            pathSegment.ray.origin = intersect;
-            result.throughputMultiplier = m.color;
-            result.pdf = 1.0f;
-            result.wasSpecular = true;
-            return result;
-        } else {
-            float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
-#if REMAP_ROUGHNESS
-            alpha = alpha * alpha;
-#endif
+    // Case pure metal
+    if (pureMetal) {
+        ScatterResult sampledResult =
+            calculate_reflection(pathSegment, intersect, normal, m,
+                                 pureDeltaMetal, sampledWm, rng);
+        sampledResult.contribution = result.contribution;
+        return sampledResult;
+    }
 
-            ScatterResult sampledResult =
-                Microfacet::get_brdf_result(pathSegment, intersect, normal, m,
-                                            alpha, rng);
+    // Case pure dielectric
+    if (pureGlass) {
+        ScatterResult sampledResult =
+            calculate_transmission(pathSegment, intersect, normal, outside, m,
+                                   smooth, woWorld, sampledWm, rng);
+        sampledResult.contribution = result.contribution;
+        return sampledResult;
+    }
+
+    if (m.transmission_factor < materialEpsilon &&
+        m.metalic_factor < materialEpsilon) {
+        ScatterResult sampledResult =
+            calculate_diffuse(pathSegment, intersect, normal, m, rng);
+        sampledResult.contribution = result.contribution;
+        return sampledResult;
+    }
+
+    // Opaque metalic + dielectric mix
+    float p_diffuse;
+    float p_metal;
+    float p_transmission;
+    material_lobe_weights(m, p_diffuse, p_metal, p_transmission);
+
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    float random_chance = u01(rng);
+
+    ScatterResult sampledResult = empty_scatter_result();
+    if (random_chance < p_metal) {
+        sampledResult =
+            calculate_reflection(pathSegment, intersect, normal, m,
+                                 pureDeltaMetal, sampledWm, rng);
+    } else if (random_chance < p_metal + p_transmission) {
+        sampledResult =
+            calculate_transmission(pathSegment, intersect, normal, outside, m,
+                                   smooth, woWorld, sampledWm, rng);
+    } else {
+        sampledResult = calculate_diffuse(pathSegment, intersect, normal, m, rng);
+    }
+
+    if (!sampledResult.wasSpecular) {
+        glm::vec3 wiWorld = glm::normalize(pathSegment.ray.direction);
+        float pdf =
+            evaluate_bsdf_pdf_for_direction(m, woWorld, wiWorld, normal,
+                                            outside);
+        glm::vec3 bsdf =
+            evaluate_bsdf_for_direction(m, woWorld, wiWorld, normal, outside);
+
+        if (pdf <= 0.0f ||
+            (bsdf.x == 0.0f && bsdf.y == 0.0f && bsdf.z == 0.0f)) {
+            sampledResult = empty_scatter_result();
             sampledResult.contribution = result.contribution;
             return sampledResult;
         }
 
-        pathSegment.ray.origin = intersect;
-        result.throughputMultiplier = m.color;
-        result.pdf = 1.0f;
-        result.wasSpecular = true;
-        return result;
-    } else {
-        pathSegment.ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
-        pathSegment.ray.origin = intersect;
-        float cosTheta = fmaxf(glm::dot(normal, pathSegment.ray.direction), 0.0f);
-        result.throughputMultiplier = m.color;
-        result.pdf = cosTheta / PI;
-        return result;
+        sampledResult.pdf = pdf;
+        sampledResult.throughputMultiplier =
+            bsdf * fabsf(glm::dot(normal, wiWorld)) / pdf;
     }
+
+    sampledResult.contribution = result.contribution;
+    return sampledResult;
 }

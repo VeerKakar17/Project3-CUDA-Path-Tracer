@@ -44,7 +44,7 @@ static void finishMaterial(Material& material)
             ? 1
             : 0;
     material.specular.color =
-        material.is_metalic ? material.color : glm::vec3(0.04f);
+        material.metalic_factor > 0.0f ? material.color : glm::vec3(0.04f);
     material.specular.exponent =
         (1.0f - material.roughness_factor) * 256.0f + 1.0f;
 }
@@ -74,33 +74,60 @@ static const tg3_value* findTg3ObjectValue(const tg3_value& value,
     return nullptr;
 }
 
-static float getEmissiveStrength(const tg3_material& material)
+static const tg3_value* findTg3ExtensionValue(const tg3_material& material,
+                                              const char* extensionName,
+                                              const char* key)
 {
     for (uint32_t i = 0; i < material.ext.extensions_count; ++i)
     {
         const tg3_extension& extension = material.ext.extensions[i];
-        if (!tg3StrEquals(extension.name, "KHR_materials_emissive_strength"))
+        if (!tg3StrEquals(extension.name, extensionName))
         {
             continue;
         }
 
-        const tg3_value* strength =
-            findTg3ObjectValue(extension.value, "emissiveStrength");
-        if (strength == nullptr)
-        {
-            return 1.0f;
-        }
-        if (strength->type == TG3_VALUE_REAL)
-        {
-            return (float)strength->real_val;
-        }
-        if (strength->type == TG3_VALUE_INT)
-        {
-            return (float)strength->int_val;
-        }
-        return 1.0f;
+        return findTg3ObjectValue(extension.value, key);
     }
-    return 1.0f;
+    return nullptr;
+}
+
+static float tg3NumberOrDefault(const tg3_value* value, float defaultValue)
+{
+    if (value == nullptr)
+    {
+        return defaultValue;
+    }
+    if (value->type == TG3_VALUE_REAL)
+    {
+        return (float)value->real_val;
+    }
+    if (value->type == TG3_VALUE_INT)
+    {
+        return (float)value->int_val;
+    }
+    return defaultValue;
+}
+
+static float getEmissiveStrength(const tg3_material& material)
+{
+    return tg3NumberOrDefault(
+        findTg3ExtensionValue(material, "KHR_materials_emissive_strength",
+                              "emissiveStrength"),
+        1.0f);
+}
+
+static float getTransmissionFactor(const tg3_material& material)
+{
+    return tg3NumberOrDefault(
+        findTg3ExtensionValue(material, "KHR_materials_transmission",
+                              "transmissionFactor"),
+        0.0f);
+}
+
+static float getIndexOfRefraction(const tg3_material& material)
+{
+    return tg3NumberOrDefault(
+        findTg3ExtensionValue(material, "KHR_materials_ior", "ior"), 1.5f);
 }
 
 static void finalizeCamera(RenderState& state, float fovy)
@@ -232,15 +259,18 @@ void Scene::loadFromJSON(const std::string& jsonName)
             }
         }
         newMaterial.alphaCutoff = p.value("ALPHA_CUTOFF", 0.5f);
-        newMaterial.is_metalic = p.value("METALLIC", 0.0f) > 0.0f ? 1 : 0;
+        newMaterial.metalic_factor =
+            p.value("METALLIC_FACTOR", p.value("METALLIC", 0.0f));
+        newMaterial.transmission_factor =
+            p.value("TRANSMISSION_FACTOR", p.value("TRANSMISSION", 0.0f));
         newMaterial.roughness_factor = p.value("ROUGHNESS", 1.0f);
         newMaterial.emissive_factor = glm::vec3(0.0f);
         newMaterial.double_sided = p.value("DOUBLE_SIDED", false) ? 1 : 0;
-        newMaterial.hasRefractive =
-            (p.value("REFRACTIVE", false) ||
-             p.value("HAS_REFRACTIVE", false))
-                ? 1
-                : 0;
+        if (p.value("REFRACTIVE", false) ||
+            p.value("HAS_REFRACTIVE", false))
+        {
+            newMaterial.transmission_factor = 1.0f;
+        }
         newMaterial.indexOfRefraction =
             p.value("IOR", p.value("ETA", 1.0f));
 
@@ -256,9 +286,9 @@ void Scene::loadFromJSON(const std::string& jsonName)
         }
         else if (p["TYPE"] == "Specular")
         {
-            if (!p.contains("METALLIC"))
+            if (!p.contains("METALLIC") && !p.contains("METALLIC_FACTOR"))
             {
-                newMaterial.is_metalic = 1;
+                newMaterial.metalic_factor = 1.0f;
             }
             if (!p.contains("ROUGHNESS"))
             {
@@ -267,7 +297,13 @@ void Scene::loadFromJSON(const std::string& jsonName)
         }
         else if (p["TYPE"] == "Refractive")
         {
-            newMaterial.hasRefractive = 1;
+            newMaterial.transmission_factor = 1.0f;
+        }
+
+        if (newMaterial.transmission_factor > 0.0f && !p.contains("IOR") &&
+            !p.contains("ETA"))
+        {
+            newMaterial.indexOfRefraction = 1.5f;
         }
 
         if (p.contains("EMISSIVE_FACTOR"))
@@ -560,7 +596,7 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         }
         newMaterial.alphaCutoff = (float)mat.alpha_cutoff;
 
-        newMaterial.is_metalic = 0;
+        newMaterial.metalic_factor = (float)pbr.metallic_factor;
         newMaterial.roughness_factor = (float)pbr.roughness_factor;
 
         newMaterial.emissive_factor = glm::vec3(
@@ -570,8 +606,11 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
             getEmissiveStrength(mat);
 
         newMaterial.double_sided = mat.double_sided ? 1 : 0;
-        newMaterial.hasRefractive = 0;
-        newMaterial.indexOfRefraction = 1.0f;
+        float transmissionFactor = getTransmissionFactor(mat);
+        newMaterial.transmission_factor = transmissionFactor;
+        newMaterial.indexOfRefraction =
+            newMaterial.transmission_factor > 0.0f ? getIndexOfRefraction(mat)
+                                                   : 1.0f;
         newMaterial.baseColorTexId =
             textureIdForTextureInfo(model, pbr.base_color_texture,
                                     imageTextureIds);
@@ -596,11 +635,11 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         defaultMaterial.alpha = 1.0f;
         defaultMaterial.alphaMode = ALPHA_MODE_OPAQUE;
         defaultMaterial.alphaCutoff = 0.5f;
-        defaultMaterial.is_metalic = 0;
+        defaultMaterial.metalic_factor = 0.0f;
         defaultMaterial.roughness_factor = 1.0f;
         defaultMaterial.emissive_factor = glm::vec3(0.0f);
         defaultMaterial.double_sided = 0;
-        defaultMaterial.hasRefractive = 0;
+        defaultMaterial.transmission_factor = 0.0f;
         defaultMaterial.indexOfRefraction = 1.0f;
         finishMaterial(defaultMaterial);
         materials.emplace_back(defaultMaterial);

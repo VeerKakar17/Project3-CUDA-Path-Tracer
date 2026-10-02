@@ -60,6 +60,18 @@
             "ROUGHNESS":0.0,
             "EMISSIVE_FACTOR":[0.0,0.0,0.0],
             "DOUBLE_SIDED":false
+        },
+        "refractive_glass":
+        {
+            "TYPE":"Refractive",
+            "RGB":[0.98,0.98,1.0],
+            "ALPHA":1.0,
+            "METALLIC":0.0,
+            "ROUGHNESS":0.0,
+            "EMISSIVE_FACTOR":[0.0,0.0,0.0],
+            "DOUBLE_SIDED":false,
+            "REFRACTIVE":true,
+            "IOR":1.5
         }
     },
     "Camera":
@@ -119,7 +131,7 @@
         },
         {
             "TYPE":"sphere",
-            "MATERIAL":"alpha_small",
+            "MATERIAL":"refractive_glass",
             "TRANS":[-1.0,4.0,-1.0],
             "ROTAT":[0.0,0.0,0.0],
             "SCALE":[3.0,3.0,3.0]

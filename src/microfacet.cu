@@ -96,6 +96,32 @@ __host__ __device__ glm::vec3 get_f_ggx(const glm::vec3 &wi,
     return f0 + (glm::vec3(1.0f) - f0) * oneMinusCos2 * oneMinusCos2 * oneMinusCos;
 }
 
+__host__ __device__ float fresnel_dielectric_relative(float cosThetaI,
+                                                      float eta) {
+    cosThetaI = fminf(fmaxf(cosThetaI, -1.0f), 1.0f);
+    float etaI = 1.0f;
+    float etaT = eta;
+    if (cosThetaI < 0.0f) {
+        float temp = etaI;
+        etaI = etaT;
+        etaT = temp;
+        cosThetaI = -cosThetaI;
+    }
+
+    float sinThetaI = sqrtf(fmaxf(0.0f, 1.0f - cosThetaI * cosThetaI));
+    float sinThetaT = etaI / etaT * sinThetaI;
+    if (sinThetaT >= 1.0f) {
+        return 1.0f;
+    }
+
+    float cosThetaT = sqrtf(fmaxf(0.0f, 1.0f - sinThetaT * sinThetaT));
+    float rParallel = ((etaT * cosThetaI) - (etaI * cosThetaT)) /
+                      ((etaT * cosThetaI) + (etaI * cosThetaT));
+    float rPerp = ((etaI * cosThetaI) - (etaT * cosThetaT)) /
+                  ((etaI * cosThetaI) + (etaT * cosThetaT));
+    return 0.5f * (rParallel * rParallel + rPerp * rPerp);
+}
+
 __host__ __device__ glm::vec3 sample_wm(float alpha, const glm::vec2 &u) {
     float phi = TWO_PI * u.x;
     float alpha2 = alpha * alpha;
@@ -106,6 +132,16 @@ __host__ __device__ glm::vec3 sample_wm(float alpha, const glm::vec2 &u) {
     return glm::normalize(glm::vec3(cosf(phi) * sinTheta,
                                     sinf(phi) * sinTheta,
                                     cosTheta));
+}
+
+__host__ __device__ glm::vec3 sample_wm(float alpha,
+                                        const glm::vec3& normal,
+                                        const glm::vec2& u) {
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
+    make_basis(normal, tangent, bitangent);
+    return glm::normalize(to_world(sample_wm(alpha, u), tangent, bitangent,
+                                   normal));
 }
 
 __host__ __device__ glm::vec3 evaluate_brdf(
@@ -176,6 +212,7 @@ __host__ __device__ ScatterResult get_brdf_result(
     glm::vec3 normal,
     const Material& m,
     float alpha,
+    const glm::vec3& sampledWm,
     thrust::default_random_engine& rng)
 {
         ScatterResult result;
@@ -183,9 +220,6 @@ __host__ __device__ ScatterResult get_brdf_result(
         result.contribution = glm::vec3(0.0f);
         result.pdf = 0.0f;
         result.wasSpecular = false;
-
-        thrust::uniform_real_distribution<float> u01(0, 1);
-        glm::vec2 u(u01(rng), u01(rng));
 
         glm::vec3 tangent;
         glm::vec3 bitangent;
@@ -203,7 +237,11 @@ __host__ __device__ ScatterResult get_brdf_result(
             return result;
         }
 
-        glm::vec3 wm = sample_wm(alpha, u);
+        glm::vec3 wm = to_local(glm::normalize(sampledWm), tangent, bitangent,
+                                normal);
+        if (wm.z <= 0.0f) {
+            wm = -wm;
+        }
         glm::vec3 wi = glm::reflect(-wo, wm);
         if (!same_hemisphere(wo, wi) || wi.z <= 0.0f) {
             pathSegment.ray.direction =
@@ -229,6 +267,171 @@ __host__ __device__ ScatterResult get_brdf_result(
         result.throughputMultiplier = brdf * cosThetaI / pdf;
         result.pdf = pdf;
         return result;
+}
+
+__host__ __device__ ScatterResult get_brdf_result(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    const Material& m,
+    float alpha,
+    thrust::default_random_engine& rng)
+{
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        glm::vec2 u(u01(rng), u01(rng));
+        glm::vec3 sampledWm = sample_wm(alpha, normal, u);
+        return get_brdf_result(pathSegment, intersect, normal, m, alpha,
+                               sampledWm, rng);
+}
+
+__host__ __device__ float wm_pdf(
+    const glm::vec3& woWorld,
+    const glm::vec3& wmWorld,
+    const glm::vec3& normal,
+    float alpha)
+{
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
+    make_basis(normal, tangent, bitangent);
+    glm::vec3 wm = to_local(glm::normalize(wmWorld), tangent, bitangent,
+                            normal);
+    if (wm.z <= 0.0f) {
+        wm = -wm;
+    }
+    return get_d_ggx(wm, alpha) * abs_cos_theta(wm);
+}
+
+__host__ __device__ glm::vec3 evaluate_dielectric_bsdf(
+    const glm::vec3& woWorld,
+    const glm::vec3& wiWorld,
+    const glm::vec3& normal,
+    const Material& m,
+    bool outside,
+    float alpha)
+{
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
+    make_basis(normal, tangent, bitangent);
+
+    glm::vec3 wo = to_local(glm::normalize(woWorld), tangent, bitangent,
+                            normal);
+    glm::vec3 wi = to_local(glm::normalize(wiWorld), tangent, bitangent,
+                            normal);
+
+    float cosThetaO = wo.z;
+    float cosThetaI = wi.z;
+    if (cosThetaO == 0.0f || cosThetaI == 0.0f) {
+        return glm::vec3(0.0f);
+    }
+
+    bool reflect = cosThetaI * cosThetaO > 0.0f;
+    float eta = fmaxf(m.indexOfRefraction, 1.0001f);
+    float etaRel = outside ? eta : 1.0f / eta;
+    float etap = reflect ? 1.0f : etaRel;
+    glm::vec3 wmUnnormalized = reflect ? wi + wo : wi * etap + wo;
+    if (glm::dot(wmUnnormalized, wmUnnormalized) <= 0.0f) {
+        return glm::vec3(0.0f);
+    }
+    glm::vec3 wm = glm::normalize(wmUnnormalized);
+    if (wm.z < 0.0f) {
+        wm = -wm;
+    }
+
+    if (glm::dot(wm, wi) * cosThetaI < 0.0f ||
+        glm::dot(wm, wo) * cosThetaO < 0.0f) {
+        return glm::vec3(0.0f);
+    }
+
+    float F = fresnel_dielectric_relative(glm::dot(wo, wm), etaRel);
+    float d = get_d_ggx(wm, alpha);
+    float g = get_g_ggx(wi, wo, alpha);
+
+    if (reflect) {
+        float denom = fabsf(4.0f * cosThetaI * cosThetaO);
+        if (denom <= 0.0f) {
+            return glm::vec3(0.0f);
+        }
+        return m.color * (d * g * F / denom);
+    }
+
+    float denom = glm::dot(wi, wm) + glm::dot(wo, wm) / etap;
+    denom = denom * denom * cosThetaI * cosThetaO;
+    if (denom == 0.0f) {
+        return glm::vec3(0.0f);
+    }
+
+    float ft = d * (1.0f - F) * g *
+               fabsf(glm::dot(wi, wm) * glm::dot(wo, wm) / denom);
+    ft /= etap * etap;
+    return m.color * ft;
+}
+
+__host__ __device__ float evaluate_dielectric_pdf(
+    const glm::vec3& woWorld,
+    const glm::vec3& wiWorld,
+    const glm::vec3& normal,
+    const Material& m,
+    bool outside,
+    float alpha)
+{
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
+    make_basis(normal, tangent, bitangent);
+
+    glm::vec3 wo = to_local(glm::normalize(woWorld), tangent, bitangent,
+                            normal);
+    glm::vec3 wi = to_local(glm::normalize(wiWorld), tangent, bitangent,
+                            normal);
+
+    float cosThetaO = wo.z;
+    float cosThetaI = wi.z;
+    if (cosThetaO == 0.0f || cosThetaI == 0.0f) {
+        return 0.0f;
+    }
+
+    bool reflect = cosThetaI * cosThetaO > 0.0f;
+    float eta = fmaxf(m.indexOfRefraction, 1.0001f);
+    float etaRel = outside ? eta : 1.0f / eta;
+    float etap = reflect ? 1.0f : etaRel;
+    glm::vec3 wmUnnormalized = reflect ? wi + wo : wi * etap + wo;
+    if (glm::dot(wmUnnormalized, wmUnnormalized) <= 0.0f) {
+        return 0.0f;
+    }
+    glm::vec3 wm = glm::normalize(wmUnnormalized);
+    if (wm.z < 0.0f) {
+        wm = -wm;
+    }
+
+    if (glm::dot(wm, wi) * cosThetaI < 0.0f ||
+        glm::dot(wm, wo) * cosThetaO < 0.0f) {
+        return 0.0f;
+    }
+
+    float R = fresnel_dielectric_relative(glm::dot(wo, wm), etaRel);
+    float T = 1.0f - R;
+    float pr = R;
+    float pt = T;
+    float probSum = pr + pt;
+    if (probSum <= 0.0f) {
+        return 0.0f;
+    }
+
+    float pdfWm = get_d_ggx(wm, alpha) * abs_cos_theta(wm);
+    if (reflect) {
+        float woDotWm = fabsf(glm::dot(wo, wm));
+        if (woDotWm <= 0.0f) {
+            return 0.0f;
+        }
+        return pdfWm / (4.0f * woDotWm) * pr / probSum;
+    }
+
+    float denom = glm::dot(wi, wm) + glm::dot(wo, wm) / etap;
+    denom *= denom;
+    if (denom <= 0.0f) {
+        return 0.0f;
+    }
+    float dwmDwi = fabsf(glm::dot(wi, wm)) / denom;
+    return pdfWm * dwmDwi * pt / probSum;
 }
 
 }

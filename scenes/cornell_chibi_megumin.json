@@ -8,7 +8,7 @@
             "ALPHA":1.0,
             "METALLIC":0.0,
             "ROUGHNESS":1.0,
-            "EMISSIVE_FACTOR":[5.0, 5.0, 5.0],
+            "EMISSIVE_FACTOR":[8.0, 8.0, 8.0],
             "DOUBLE_SIDED":false
         },
         "diffuse_white":
@@ -120,9 +120,9 @@
         {
             "TYPE":"mesh",
             "FILE":"chibi_megumin.glb",
-            "TRANS":[-1.0,4.0,-1.0],
-            "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[3.0,3.0,3.0]
+            "TRANS":[-1.0,4.0,1.0],
+            "ROTAT":[-10.0,0.0,15.0],
+            "SCALE":[3.5,3.5,3.5]
         }
     ]
 }

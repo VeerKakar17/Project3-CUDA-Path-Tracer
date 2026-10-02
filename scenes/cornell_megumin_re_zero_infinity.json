@@ -11,6 +11,16 @@
             "EMISSIVE_FACTOR":[5.0, 5.0, 5.0],
             "DOUBLE_SIDED":false
         },
+        "floor_light":
+        {
+            "TYPE":"Emitting",
+            "RGB":[1.0, 1.0, 1.0],
+            "ALPHA":1.0,
+            "METALLIC":0.0,
+            "ROUGHNESS":1.0,
+            "EMISSIVE_FACTOR":[2.0, 2.0, 2.0],
+            "DOUBLE_SIDED":false
+        },
         "diffuse_white":
         {
             "TYPE":"Diffuse",
@@ -51,15 +61,31 @@
             "EMISSIVE_FACTOR":[0.0, 0.0, 0.0],
             "DOUBLE_SIDED":false
         },
-        "alpha_small":
+        "glass_pane":
         {
-            "TYPE":"Diffuse",
-            "RGB":[0.98,0.98,0.98],
-            "ALPHA":0.2,
+            "TYPE":"Refractive",
+            "RGB":[0.99,0.93,1.0],
+            "ALPHA":1.0,
             "METALLIC":0.0,
             "ROUGHNESS":0.0,
+            "TRANSMISSION":1.0,
             "EMISSIVE_FACTOR":[0.0,0.0,0.0],
-            "DOUBLE_SIDED":false
+            "DOUBLE_SIDED":false,
+            "REFRACTIVE":true,
+            "IOR":1.5
+        },
+        "glass_pane_rough":
+        {
+            "TYPE":"Refractive",
+            "RGB":[0.99,0.93,1.0],
+            "ALPHA":1.0,
+            "METALLIC":0.0,
+            "ROUGHNESS":0.25,
+            "TRANSMISSION":1.0,
+            "EMISSIVE_FACTOR":[0.0,0.0,0.0],
+            "DOUBLE_SIDED":false,
+            "REFRACTIVE":true,
+            "IOR":1.5
         }
     },
     "Camera":
@@ -78,9 +104,9 @@
         {
             "TYPE":"cube",
             "MATERIAL":"light",
-            "TRANS":[0.0,10.0,0.0],
+            "TRANS":[0.0,10.0,2.0],
             "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[3.0,0.3,3.0]
+            "SCALE":[4.0,0.4,4.0]
         },
         {
             "TYPE":"cube",
@@ -88,6 +114,13 @@
             "TRANS":[0.0,0.0,0.0],
             "ROTAT":[0.0,0.0,0.0],
             "SCALE":[10.0,0.01,10.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"light",
+            "TRANS":[3.0,2.03,0.0],
+            "ROTAT":[60.0,0.0,40.0],
+            "SCALE":[3.0,0.02,3.0]
         },
         {
             "TYPE":"cube",
@@ -119,10 +152,17 @@
         },
         {
             "TYPE":"mesh",
-            "FILE":"meguminre_zero_infinity.glb",
-            "TRANS":[-1.0,4.0,-1.0],
-            "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[3.0,3.0,3.0]
+            "FILE":"scene/gltf",
+            "TRANS":[1.0,0.0,1.0],
+            "ROTAT":[-5.0,0.0,15.0],
+            "SCALE":[4.0,4.0,4.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"glass_pane_rough",
+            "TRANS":[0.0,4.0,3.3],
+            "ROTAT":[0.0,-15.0,0.0],
+            "SCALE":[10.0,5.0,1]
         }
     ]
 }
