@@ -22,6 +22,8 @@
 
 #define ERRORCHECK 1
 static constexpr bool SORT_BY_MATERIAL = true;
+static constexpr bool TOGGLE_ENVIRONMENT = false;
+static constexpr bool USE_BVH_TREE = true;
 
 #define FILENAME                                                               \
   (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -399,7 +401,25 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
 }
 
 __device__ glm::vec3 environmentColor(glm::vec3 &dir) {
-    return glm::vec3(0.0f, 0.0f, 0.0f);
+    if (!TOGGLE_ENVIRONMENT) {
+        return glm::vec3(0.0f);
+    }
+
+    glm::vec3 d = glm::normalize(dir);
+
+    glm::vec3 horizonColor = glm::vec3(0.80f, 0.86f, 0.95f);
+    glm::vec3 zenithColor = glm::vec3(0.20f, 0.42f, 0.95f);
+    glm::vec3 groundColor = glm::vec3(0.22f, 0.20f, 0.18f);
+
+    float skyT = glm::clamp(d.y, 0.0f, 1.0f);
+    glm::vec3 skyColor = glm::mix(horizonColor, zenithColor, skyT);
+    glm::vec3 envColor = d.y >= 0.0f ? skyColor : groundColor;
+
+    glm::vec3 sunDir = glm::normalize(glm::vec3(-0.35f, 0.85f, 0.25f));
+    float sunAmount = powf(fmaxf(glm::dot(d, sunDir), 0.0f), 1024.0f);
+    glm::vec3 sunColor = glm::vec3(18.0f, 14.0f, 9.0f) * sunAmount;
+
+    return envColor + sunColor;
 }
 
 __global__ void computeIntersections(int depth, int num_paths,
@@ -462,17 +482,38 @@ __global__ void computeIntersections(int depth, int num_paths,
         }
       }
 
-      if (triangles_size > 0 && bvh != NULL &&
-          BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
-                       tmp_intersect, tmp_normal, hit_material_id, tmp_uv,
-                       tmp_tangent, tmp_tangent_sign, hit_triangle_index,
-                       hit_outside)) {
-        hit_geom_index = -1;
-        intersect_point = tmp_intersect;
-        normal = tmp_normal;
-        hit_uv = tmp_uv;
-        hit_tangent = tmp_tangent;
-        hit_tangent_sign = tmp_tangent_sign;
+      if (triangles_size > 0) {
+        if (USE_BVH_TREE && bvh != NULL &&
+            BVHIntersect(pathSegment.ray, triangles, triangles_size, bvh, t_min,
+                         tmp_intersect, tmp_normal, hit_material_id, tmp_uv,
+                         tmp_tangent, tmp_tangent_sign, hit_triangle_index,
+                         hit_outside)) {
+          hit_geom_index = -1;
+          intersect_point = tmp_intersect;
+          normal = tmp_normal;
+          hit_uv = tmp_uv;
+          hit_tangent = tmp_tangent;
+          hit_tangent_sign = tmp_tangent_sign;
+        } else if (!USE_BVH_TREE) {
+          for (int i = 0; i < triangles_size; i++) {
+            t = triangleIntersectionTest(triangles[i], pathSegment.ray,
+                                         tmp_intersect, tmp_normal, outside,
+                                         tmp_uv, tmp_tangent,
+                                         tmp_tangent_sign);
+            if (t > 0.0f && t_min > t) {
+              t_min = t;
+              hit_geom_index = -1;
+              hit_triangle_index = i;
+              hit_material_id = triangles[i].materialid;
+              intersect_point = tmp_intersect;
+              normal = tmp_normal;
+              hit_uv = tmp_uv;
+              hit_tangent = tmp_tangent;
+              hit_tangent_sign = tmp_tangent_sign;
+              hit_outside = outside;
+            }
+          }
+        }
       }
 
       if (hit_material_id == -1) {
