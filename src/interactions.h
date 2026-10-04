@@ -45,6 +45,7 @@ struct ScatterResult
 {
     glm::vec3 throughputMultiplier;
     glm::vec3 contribution;
+    float etaScale;
     float pdf;
     bool wasSpecular;
 };

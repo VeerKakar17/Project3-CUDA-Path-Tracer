@@ -339,6 +339,7 @@ __device__ ScatterResult empty_scatter_result() {
     ScatterResult result;
     result.throughputMultiplier = glm::vec3(0.0f);
     result.contribution = glm::vec3(0.0f);
+    result.etaScale = 1.0f;
     result.pdf = 0.0f;
     result.wasSpecular = false;
     return result;
@@ -413,6 +414,7 @@ __device__ ScatterResult calculate_transmission(
             return result;
         }
         result.pdf = T;
+        result.etaScale = etaP * etaP;
     }
 
     if (!smooth) {

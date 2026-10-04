@@ -25,7 +25,11 @@
 static constexpr bool SORT_BY_MATERIAL = true;
 static constexpr bool TOGGLE_ENVIRONMENT = false;
 static constexpr bool USE_BVH_TREE = true;
-static constexpr bool USE_OIDN_AOVS = false;
+static constexpr bool USE_OIDN_AOVS = true;
+static constexpr bool USE_RUSSIAN_ROULETTE = true;
+
+static constexpr int rrStart = 4;
+
 
 #define FILENAME                                                               \
   (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -587,6 +591,10 @@ __device__ float saturateFloat(float value) {
   return fminf(fmaxf(value, 0.0f), 1.0f);
 }
 
+__device__ float max_component(glm::vec3 value) {
+  return fmaxf(value.x, fmaxf(value.y, value.z));
+}
+
 __device__ float srgbToLinearFloat(float value) {
   value = saturateFloat(value);
   if (value <= 0.04045f) {
@@ -799,13 +807,27 @@ __global__ void computeRayColors(int iter, int depth, int num_paths,
                                materials_size, rng);
                 segment->radiance += segment->throughput * scatter.contribution;
                 segment->throughput *= scatter.throughputMultiplier;
+                segment->etaScale *= scatter.etaScale;
                 segment->lastBsdfPdf = scatter.pdf;
                 segment->lastBounceWasSpecular = scatter.wasSpecular;
+
+                if (USE_RUSSIAN_ROULETTE && depth > rrStart &&
+                    segment->remainingBounces > 1) {
+                    float p = max_component(segment->throughput *
+                                            segment->etaScale);
+                    p = fminf(fmaxf(p, 0.05f), 0.95f);
+                    if (u01(rng) > p) {
+                        segment->remainingBounces = 0;
+                    } else {
+                        segment->throughput /= p;
+                    }
+                }
             }
 
             if (segment->remainingBounces > 0) {
                 segment->remainingBounces--;
             }
+
             if (orderedPathSegments != NULL) {
               orderedPathSegments[segment->pixelIndex] = *segment;
             }

@@ -12,19 +12,6 @@ CUDA Path Tracer
 project, and we will not be able to grade you without a good README.
 
 
-- Added ideal diffuse with actual path tracing
-- added anti aliasing
-- added stream comopaction + material based optimization
-- Added reflective and alpha materials
-- added gltf loading
-- added BVH Tree for mesh acceleration
-- added gltf textures
-- Added metalics (reflective materials)
-- Added microfacets (rough vs smooth metals)
-- Added dielectrics (rough vs smooth, both with )
-- Added mixed opaque materials (partially dielectric + opaque + rough + metallic)
-- Added OIDN GPU Denoiser with beauty, albedo, and normal buffers.
-
 - Ideal diffuse path tracing with anti-aliasing
 - Stream compaction and material sorting optimization
 - Reflective, metallic, alpha, and emissive materials
@@ -36,3 +23,4 @@ project, and we will not be able to grade you without a good README.
 - Next-event estimation, shadow rays, and MIS for emissive geometry
 - Procedural environment lighting toggle with sky/sun/ground color
 - OIDN GPU denoiser using beauty, albedo, and normal buffers
+- Russian Roulette

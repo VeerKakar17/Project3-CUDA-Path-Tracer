@@ -218,6 +218,7 @@ __host__ __device__ ScatterResult get_brdf_result(
         ScatterResult result;
         result.throughputMultiplier = glm::vec3(0.0f);
         result.contribution = glm::vec3(0.0f);
+        result.etaScale = 1.0f;
         result.pdf = 0.0f;
         result.wasSpecular = false;
 
