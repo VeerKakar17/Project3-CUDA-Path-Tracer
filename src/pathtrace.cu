@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cuda.h>
+#include <OpenImageDenoise/oidn.hpp>
 #include <thrust/copy.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
@@ -116,6 +117,13 @@ static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections =
 static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections_tmp =
     NULL;
 static std::vector<DeviceTexture> hst_device_textures;
+static glm::vec3 *dev_beauty = NULL;
+static glm::vec3 *dev_denoised = NULL;
+static float *dev_albedo = NULL;
+static float *dev_normal = NULL;
+static oidn::DeviceRef oidnDevice;
+static oidn::FilterRef oidnFilter;
+static cudaStream_t oidnStream = 0;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
@@ -212,33 +220,54 @@ void pathtraceInit(Scene *scene) {
 
   // TODO: initialize any extra device memeory you need
 
+  int cudaDevice = 0;
+  cudaStreamCreate(&oidnStream);
+
+  oidnDevice = oidn::newCUDADevice(cudaDevice, oidnStream);
+  oidnDevice.commit();
+
+  cudaMalloc(&dev_beauty, pixelcount * sizeof(glm::vec3));
+  cudaMalloc(&dev_denoised, pixelcount * sizeof(glm::vec3));
+  cudaMalloc(&dev_albedo, pixelcount * sizeof(float));
+  cudaMalloc(&dev_normal, pixelcount * sizeof(float));
+
   checkCUDAError("pathtraceInit");
 }
 
 void pathtraceFree() {
-  cudaFree(dev_image); // no-op if dev_image is null
-  cudaFree(dev_paths);
-  cudaFree(dev_paths_tmp);
-  cudaFree(dev_paths_tmp2);
-  cudaFree(dev_geoms);
-  cudaFree(dev_triangles);
-  cudaFree(dev_bvh);
-  cudaFree(dev_materials);
-  for (DeviceTexture &texture : hst_device_textures) {
-    cudaFree(texture.pixels);
-  }
-  hst_device_textures.clear();
-  cudaFree(dev_textures);
-  dev_textures = NULL;
-  cudaFree(dev_lights);
-  dev_lights = NULL;
-  cudaFree(dev_intersections);
-  cudaFree(dev_intersections_tmp);
-  cudaFree(dev_firstThreadIdx);
-  cudaFree(dev_segment_matidx);
-  cudaFree(dev_intersection_matidx);
-  // TODO: clean up any extra device memory you created
+    cudaFree(dev_image); // no-op if dev_image is null
+    cudaFree(dev_paths);
+    cudaFree(dev_paths_tmp);
+    cudaFree(dev_paths_tmp2);
+    cudaFree(dev_geoms);
+    cudaFree(dev_triangles);
+    cudaFree(dev_bvh);
+    cudaFree(dev_materials);
+    for (DeviceTexture &texture : hst_device_textures) {
+      cudaFree(texture.pixels);
+    }
+    hst_device_textures.clear();
+    cudaFree(dev_textures);
+    dev_textures = NULL;
+    cudaFree(dev_lights);
+    dev_lights = NULL;
+    cudaFree(dev_intersections);
+    cudaFree(dev_intersections_tmp);
+    cudaFree(dev_firstThreadIdx);
+    cudaFree(dev_segment_matidx);
+    cudaFree(dev_intersection_matidx);
 
+    cudaFree(dev_beauty);
+    cudaFree(dev_albedo);
+    cudaFree(dev_normal);
+    cudaFree(dev_denoised);
+
+    oidnFilter.release();
+    oidnDevice.release();
+    if (oidnStream != 0) {
+      cudaStreamDestroy(oidnStream);
+      oidnStream = 0;
+    }
   checkCUDAError("pathtraceFree");
 }
 
@@ -804,6 +833,15 @@ __global__ void finalGather(int nPaths, glm::vec3 *image,
   }
 }
 
+__global__ void setupOidnBeauty(glm::vec3 *image, glm::vec3 *beauty, int pixelcount, int iter) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= pixelcount) {
+        return;
+    }
+
+    beauty[idx] = image[idx] / (float) iter;
+}
+
 /**
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
@@ -982,6 +1020,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
                                                 dev_paths);
 
   ///////////////////////////////////////////////////////////////////////////
+  
 
   // Send results to OpenGL buffer for rendering
   sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter,
@@ -992,4 +1031,34 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
              pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 
   checkCUDAError("pathtrace");
+}
+
+void oidn_denoise(Scene *scene, int iter) {
+    Camera &cam = scene->state.camera;
+    int pixelcount = cam.resolution.x * cam.resolution.y;
+
+    const int blockSize1d = 128;
+    const int blocks = (pixelcount + blockSize1d - 1) / blockSize1d;
+
+    setupOidnBeauty<<<blocks, blockSize1d>>>(dev_image, dev_beauty, pixelcount, iter);
+
+    cudaDeviceSynchronize();
+
+    oidnFilter = oidnDevice.newFilter("RT");
+    oidnFilter.setImage("color", dev_beauty, oidn::Format::Float3,
+                        cam.resolution.x, cam.resolution.y);
+    oidnFilter.setImage("output", dev_denoised, oidn::Format::Float3,
+                        cam.resolution.x, cam.resolution.y);
+    oidnFilter.set("hdr", true);
+    oidnFilter.commit();
+
+    oidnFilter.execute();
+    const char *errorMessage;
+    if (oidnDevice.getError(errorMessage) != oidn::Error::None)
+        fprintf(stderr, "OIDN error: %s\n", errorMessage);
+
+    cudaMemcpy(scene->state.image.data(), dev_denoised, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    for (glm::vec3 &pixel : scene->state.image) {
+        pixel *= (float)iter;
+    }
 }

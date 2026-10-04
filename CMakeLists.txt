@@ -23,6 +23,17 @@ endif()
 
 find_package(OpenGL REQUIRED)
 
+set(OIDN_ROOT "${CMAKE_SOURCE_DIR}/denoiser/oidn-2.5.1.x86_64.linux")
+find_package(OpenImageDenoise CONFIG REQUIRED
+    PATHS "${OIDN_ROOT}/lib/cmake/OpenImageDenoise-2.5.1"
+    NO_DEFAULT_PATH
+)
+set_target_properties(OpenImageDenoise OpenImageDenoise_core PROPERTIES
+    MAP_IMPORTED_CONFIG_DEBUG Release
+    MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
+    MAP_IMPORTED_CONFIG_MINSIZEREL Release
+)
+
 if(UNIX)
     include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
     find_package(glfw3 REQUIRED)
@@ -116,9 +127,15 @@ source_group("ImGui\\Sources" FILES ${imgui_sources})
 add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers})
 target_link_libraries(${CMAKE_PROJECT_NAME}
     ${GL_LIBRARIES}
+    OpenImageDenoise
     #stream_compaction  # TODO: uncomment if using your stream compaction
 )
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE TINYGLTF3_ENABLE_FS)
+target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE "${OIDN_ROOT}/lib")
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+    BUILD_RPATH "${OIDN_ROOT}/lib"
+    INSTALL_RPATH "${OIDN_ROOT}/lib"
+)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES "75;86;89")
 

@@ -152,7 +152,7 @@
         },
         {
             "TYPE":"mesh",
-            "FILE":"scene/gltf",
+            "FILE":"sparkle_star_rail.glb",
             "TRANS":[1.0,0.0,1.0],
             "ROTAT":[-5.0,0.0,15.0],
             "SCALE":[4.0,4.0,4.0]

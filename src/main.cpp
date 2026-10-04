@@ -465,6 +465,7 @@ void runCuda()
     }
     else
     {
+        oidn_denoise(scene, iteration);
         saveImage();
         pathtraceFree();
         cudaDeviceReset();

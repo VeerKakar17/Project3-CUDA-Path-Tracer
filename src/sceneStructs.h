@@ -78,6 +78,10 @@ struct Material
     int emissiveTexId;
     int normalTexId;
 
+    float thicknessFactor;
+    glm::vec3 attenuationColor;
+    float attenuationDistance;
+
     Material() : metalic_factor(0.0f), roughness_factor(1.0f),
         is_emissive(0), double_sided(0), transmission_factor(0.0f),
         indexOfRefraction(1.0f), emissiveTexId(-1), normalTexId(-1),

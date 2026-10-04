@@ -559,3 +559,4 @@ xcuserdata
 *.xcuserstate
 
 *.glb
+denoiser/
