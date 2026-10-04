@@ -21,6 +21,7 @@ project, and we will not be able to grade you without a good README.
 - Smooth and rough dielectric glass with IOR/transmission
 - Mixed diffuse/metallic/transmissive materials
 - Next-event estimation, shadow rays, and MIS for emissive geometry
-- Procedural environment lighting toggle with sky/sun/ground color
+- HDR Environment Map with Lighting
 - OIDN GPU denoiser using beauty, albedo, and normal buffers
 - Russian Roulette
+- Volumetric dielectrics

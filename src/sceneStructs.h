@@ -86,21 +86,27 @@ struct Material
         is_emissive(0), double_sided(0), transmission_factor(0.0f),
         indexOfRefraction(1.0f), emissiveTexId(-1), normalTexId(-1),
         baseColorTexId(-1), metallicRoughnessTexId(-1),
-        alphaMode(ALPHA_MODE_OPAQUE), alphaCutoff(0.5f) {}
+        alphaMode(ALPHA_MODE_OPAQUE), alphaCutoff(0.5f),
+        thicknessFactor(0.0f), attenuationColor(1.0f),
+        attenuationDistance(3.402823466e+38f) {}
 };
 
 struct Texture {
     int width;
     int height;
     int channels;
+    bool isHdr;
     std::vector<uchar4> pixels;
+    std::vector<glm::vec4> hdrPixels;
 };
 
 struct DeviceTexture {
     int width;
     int height;
     int channels;
+    int isHdr;
     uchar4 *pixels;
+    glm::vec4 *hdrPixels;
 };
 
 enum SceneLightType : uint8_t
@@ -180,6 +186,7 @@ struct PathSegment
     int remainingBounces;
 
     float etaScale;
+    int mediumMaterialIndex;
 
     float lastBsdfPdf;
     bool lastBounceWasSpecular;

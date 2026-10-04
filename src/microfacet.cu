@@ -221,6 +221,7 @@ __host__ __device__ ScatterResult get_brdf_result(
         result.etaScale = 1.0f;
         result.pdf = 0.0f;
         result.wasSpecular = false;
+        result.wasTransmission = false;
 
         glm::vec3 tangent;
         glm::vec3 bitangent;

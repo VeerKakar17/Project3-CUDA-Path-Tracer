@@ -48,6 +48,7 @@ struct ScatterResult
     float etaScale;
     float pdf;
     bool wasSpecular;
+    bool wasTransmission;
 };
 
 __device__ glm::vec3 evaluateEmissiveHit(
@@ -76,4 +77,9 @@ __device__ ScatterResult scatterRay(
     BVHNode* bvh,
     Material* materials,
     int materials_size,
+    int materialId,
     thrust::default_random_engine& rng);
+
+__device__ glm::vec3 get_volume_transmittance(const glm::vec3& attenuationColor,
+                                              float attenuationDistance,
+                                              float distance);

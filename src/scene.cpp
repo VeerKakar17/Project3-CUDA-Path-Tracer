@@ -26,11 +26,17 @@ using namespace std;
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
+static const char* DEFAULT_GLTF_ENVIRONMENT_MAP =
+    "scenes/textures/wooden_studio_10_4k.hdr";
+
 static void appendGltfFile(const std::string& gltfName,
                            const glm::mat4& rootTransform,
                            std::vector<Material>& materials,
                            std::vector<Triangle>& triangles,
                            std::vector<Texture>& textures);
+static bool appendTextureFile(const fs::path& texturePath,
+                              std::vector<Texture>& textures,
+                              int& textureId);
 
 static glm::vec3 readVec3(const json& value)
 {
@@ -130,6 +136,45 @@ static float getIndexOfRefraction(const tg3_material& material)
         findTg3ExtensionValue(material, "KHR_materials_ior", "ior"), 1.5f);
 }
 
+static glm::vec3 tg3Vec3OrDefault(const tg3_value* value,
+                                  const glm::vec3& defaultValue)
+{
+    if (value == nullptr || value->type != TG3_VALUE_ARRAY ||
+        value->array_count < 3)
+    {
+        return defaultValue;
+    }
+
+    return glm::vec3(
+        tg3NumberOrDefault(&value->array_data[0], defaultValue.x),
+        tg3NumberOrDefault(&value->array_data[1], defaultValue.y),
+        tg3NumberOrDefault(&value->array_data[2], defaultValue.z));
+}
+
+static float getVolumeThicknessFactor(const tg3_material& material)
+{
+    return tg3NumberOrDefault(
+        findTg3ExtensionValue(material, "KHR_materials_volume",
+                              "thicknessFactor"),
+        0.0f);
+}
+
+static float getVolumeAttenuationDistance(const tg3_material& material)
+{
+    return tg3NumberOrDefault(
+        findTg3ExtensionValue(material, "KHR_materials_volume",
+                              "attenuationDistance"),
+        3.402823466e+38f);
+}
+
+static glm::vec3 getVolumeAttenuationColor(const tg3_material& material)
+{
+    return tg3Vec3OrDefault(
+        findTg3ExtensionValue(material, "KHR_materials_volume",
+                              "attenuationColor"),
+        glm::vec3(1.0f));
+}
+
 static void finalizeCamera(RenderState& state, float fovy)
 {
     Camera& camera = state.camera;
@@ -227,9 +272,49 @@ Scene::Scene(string filename)
 
 void Scene::loadFromJSON(const std::string& jsonName)
 {
+    materials.clear();
+    triangles.clear();
+    textures.clear();
+    geoms.clear();
+    lights.clear();
+    environmentMapTexId = -1;
+
     std::ifstream f(jsonName);
     json data = json::parse(f);
     fs::path jsonDir = fs::path(jsonName).parent_path();
+
+    if (data.contains("Environment") && data["Environment"].is_object())
+    {
+        const json& environment = data["Environment"];
+        if (environment.contains("Path") && !environment["Path"].is_null())
+        {
+            std::string environmentPathString =
+                environment["Path"].get<std::string>();
+            if (!environmentPathString.empty() &&
+                environmentPathString != "none" &&
+                environmentPathString != "None" &&
+                environmentPathString != "NONE")
+            {
+                fs::path environmentPath = environmentPathString;
+                if (environmentPath.is_relative())
+                {
+                    environmentPath = jsonDir / environmentPath;
+                }
+
+                int textureId = -1;
+                if (appendTextureFile(environmentPath, textures, textureId))
+                {
+                    environmentMapTexId = textureId;
+                }
+                else
+                {
+                    cerr << "Skipping environment map " << environmentPath
+                         << " because it could not be loaded" << endl;
+                }
+            }
+        }
+    }
+
     const auto& materialsData = data["Materials"];
     std::unordered_map<std::string, uint32_t> MatNameToID;
     for (const auto& item : materialsData.items())
@@ -273,6 +358,14 @@ void Scene::loadFromJSON(const std::string& jsonName)
         }
         newMaterial.indexOfRefraction =
             p.value("IOR", p.value("ETA", 1.0f));
+        newMaterial.thicknessFactor =
+            p.value("THICKNESS_FACTOR", p.value("THICKNESS", 0.0f));
+        if (p.contains("ATTENUATION_COLOR"))
+        {
+            newMaterial.attenuationColor = readVec3(p["ATTENUATION_COLOR"]);
+        }
+        newMaterial.attenuationDistance =
+            p.value("ATTENUATION_DISTANCE", 3.402823466e+38f);
 
         if (p["TYPE"] == "Diffuse")
         {
@@ -486,6 +579,7 @@ static bool appendDecodedImage(unsigned char* decodedPixels, int width,
     texture.width = width;
     texture.height = height;
     texture.channels = 4;
+    texture.isHdr = false;
     texture.pixels.resize((size_t)width * (size_t)height);
     memcpy(texture.pixels.data(), decodedPixels,
            texture.pixels.size() * sizeof(uchar4));
@@ -493,6 +587,61 @@ static bool appendDecodedImage(unsigned char* decodedPixels, int width,
     textureId = (int)textures.size();
     textures.emplace_back(std::move(texture));
     return true;
+}
+
+static bool appendTextureFile(const fs::path& texturePath,
+                              std::vector<Texture>& textures,
+                              int& textureId)
+{
+    int width = 0;
+    int height = 0;
+    int sourceChannels = 0;
+    std::string pathString = texturePath.string();
+
+    if (stbi_is_hdr(pathString.c_str()))
+    {
+        float* decodedPixels =
+            stbi_loadf(pathString.c_str(), &width, &height, &sourceChannels, 4);
+        if (decodedPixels == nullptr || width <= 0 || height <= 0)
+        {
+            if (decodedPixels != nullptr)
+            {
+                stbi_image_free(decodedPixels);
+            }
+            return false;
+        }
+
+        Texture texture{};
+        texture.width = width;
+        texture.height = height;
+        texture.channels = 4;
+        texture.isHdr = true;
+        texture.hdrPixels.resize((size_t)width * (size_t)height);
+        for (size_t i = 0; i < texture.hdrPixels.size(); ++i)
+        {
+            size_t base = i * 4;
+            texture.hdrPixels[i] =
+                glm::vec4(decodedPixels[base + 0], decodedPixels[base + 1],
+                          decodedPixels[base + 2], decodedPixels[base + 3]);
+        }
+
+        stbi_image_free(decodedPixels);
+        textureId = (int)textures.size();
+        textures.emplace_back(std::move(texture));
+        return true;
+    }
+
+    unsigned char* decodedPixels =
+        stbi_load(pathString.c_str(), &width, &height, &sourceChannels, 4);
+
+    bool loaded = appendDecodedImage(decodedPixels, width, height,
+                                     sourceChannels, textures, textureId);
+    if (decodedPixels != nullptr)
+    {
+        stbi_image_free(decodedPixels);
+    }
+
+    return loaded;
 }
 
 static std::vector<int> append_textures(const tg3_model& model,
@@ -611,6 +760,9 @@ static int append_materials(const tg3_model &model, std::vector<Material> &mater
         newMaterial.indexOfRefraction =
             newMaterial.transmission_factor > 0.0f ? getIndexOfRefraction(mat)
                                                    : 1.0f;
+        newMaterial.thicknessFactor = getVolumeThicknessFactor(mat);
+        newMaterial.attenuationColor = getVolumeAttenuationColor(mat);
+        newMaterial.attenuationDistance = getVolumeAttenuationDistance(mat);
         newMaterial.baseColorTexId =
             textureIdForTextureInfo(model, pbr.base_color_texture,
                                     imageTextureIds);
@@ -1144,6 +1296,21 @@ void Scene::loadFromGltf(const std::string &gltfName) {
     triangles.clear();
     textures.clear();
     geoms.clear();
+    lights.clear();
+    environmentMapTexId = -1;
+
+    int textureId = -1;
+    if (appendTextureFile(DEFAULT_GLTF_ENVIRONMENT_MAP, textures, textureId))
+    {
+        environmentMapTexId = textureId;
+    }
+    else
+    {
+        cerr << "Skipping default glTF environment map "
+             << DEFAULT_GLTF_ENVIRONMENT_MAP
+             << " because it could not be loaded" << endl;
+    }
+
     appendGltfFile(gltfName, glm::mat4(1.0f), materials, triangles, textures);
     setupDefaultGltfCamera(state, triangles, gltfName);
     buildLightList();

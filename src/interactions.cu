@@ -342,6 +342,7 @@ __device__ ScatterResult empty_scatter_result() {
     result.etaScale = 1.0f;
     result.pdf = 0.0f;
     result.wasSpecular = false;
+    result.wasTransmission = false;
     return result;
 }
 
@@ -415,6 +416,7 @@ __device__ ScatterResult calculate_transmission(
         }
         result.pdf = T;
         result.etaScale = etaP * etaP;
+        result.wasTransmission = true;
     }
 
     if (!smooth) {
@@ -467,6 +469,18 @@ __device__ ScatterResult calculate_diffuse(
     return result;
 }
 
+__device__ glm::vec3 get_volume_transmittance(const glm::vec3& attenuationColor,
+                                              float attenuationDistance,
+                                              float distance) {
+    if (attenuationDistance <= 0.0f || attenuationDistance >= FLT_MAX ||
+        distance <= 0.0f) {
+        return glm::vec3(1.0f);
+    }
+
+    float x = distance / attenuationDistance;
+    return glm::pow(attenuationColor, glm::vec3(x));
+}
+
 __device__ ScatterResult scatterRay(PathSegment &pathSegment,
                                     glm::vec3 intersect, glm::vec3 normal,
                                     bool outside,
@@ -480,6 +494,7 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
                                     BVHNode *bvh,
                                     Material *materials,
                                     int materials_size,
+                                    int materialId,
                                     thrust::default_random_engine &rng) {
     const float materialEpsilon = 0.001f;
     
@@ -555,6 +570,15 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
             calculate_transmission(pathSegment, intersect, normal, outside, m,
                                    smooth, woWorld, sampledWm, rng);
         sampledResult.contribution = result.contribution;
+
+        if (sampledResult.wasTransmission) {
+            if (outside && m.thicknessFactor > 0.0f) {
+                pathSegment.mediumMaterialIndex = materialId;
+            } else if (!outside) {
+                pathSegment.mediumMaterialIndex = -1;
+            }
+        }
+
         return sampledResult;
     }
 
@@ -606,6 +630,14 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
         sampledResult.pdf = pdf;
         sampledResult.throughputMultiplier =
             bsdf * fabsf(glm::dot(normal, wiWorld)) / pdf;
+    }
+
+    if (sampledResult.wasTransmission) {
+        if (outside && m.thicknessFactor > 0.0f) {
+            pathSegment.mediumMaterialIndex = materialId;
+        } else if (!outside) {
+            pathSegment.mediumMaterialIndex = -1;
+        }
     }
 
     sampledResult.contribution = result.contribution;

@@ -23,7 +23,7 @@
 
 #define ERRORCHECK 1
 static constexpr bool SORT_BY_MATERIAL = true;
-static constexpr bool TOGGLE_ENVIRONMENT = false;
+static constexpr bool TOGGLE_ENVIRONMENT = true;
 static constexpr bool USE_BVH_TREE = true;
 static constexpr bool USE_OIDN_AOVS = true;
 static constexpr bool USE_RUSSIAN_ROULETTE = true;
@@ -171,11 +171,21 @@ void pathtraceInit(Scene *scene) {
     deviceTexture.width = texture.width;
     deviceTexture.height = texture.height;
     deviceTexture.channels = texture.channels;
+    deviceTexture.isHdr = texture.isHdr ? 1 : 0;
+    deviceTexture.pixels = NULL;
+    deviceTexture.hdrPixels = NULL;
     if (!texture.pixels.empty()) {
       cudaMalloc(&deviceTexture.pixels,
                  texture.pixels.size() * sizeof(uchar4));
       cudaMemcpy(deviceTexture.pixels, texture.pixels.data(),
                  texture.pixels.size() * sizeof(uchar4),
+                 cudaMemcpyHostToDevice);
+    }
+    if (!texture.hdrPixels.empty()) {
+      cudaMalloc(&deviceTexture.hdrPixels,
+                 texture.hdrPixels.size() * sizeof(glm::vec4));
+      cudaMemcpy(deviceTexture.hdrPixels, texture.hdrPixels.data(),
+                 texture.hdrPixels.size() * sizeof(glm::vec4),
                  cudaMemcpyHostToDevice);
     }
     hst_device_textures[i] = deviceTexture;
@@ -250,6 +260,7 @@ void pathtraceFree() {
     cudaFree(dev_materials);
     for (DeviceTexture &texture : hst_device_textures) {
       cudaFree(texture.pixels);
+      cudaFree(texture.hdrPixels);
     }
     hst_device_textures.clear();
     cudaFree(dev_textures);
@@ -299,6 +310,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
     segment.etaScale = 1.0f;
     segment.lastBsdfPdf = 0.0f;
     segment.lastBounceWasSpecular = true;
+    segment.mediumMaterialIndex = -1;
 
     // TODO: implement antialiasing by jittering the ray
 
@@ -434,26 +446,24 @@ __device__ bool BVHIntersect(const Ray &ray, Triangle *triangles,
   return hit;
 }
 
-__device__ glm::vec3 environmentColor(glm::vec3 &dir) {
-    if (!TOGGLE_ENVIRONMENT) {
+__device__ glm::vec4 sample_texture(DeviceTexture *textures, int textures_size,
+                                    int textureId, const glm::vec2 &uv);
+
+__device__ glm::vec3 environmentColor(glm::vec3 &dir, DeviceTexture *textures,
+                                      int environmentMapTexId) {
+    if (!TOGGLE_ENVIRONMENT || environmentMapTexId < 0) {
         return glm::vec3(0.0f);
     }
 
     glm::vec3 d = glm::normalize(dir);
 
-    glm::vec3 horizonColor = glm::vec3(0.80f, 0.86f, 0.95f);
-    glm::vec3 zenithColor = glm::vec3(0.20f, 0.42f, 0.95f);
-    glm::vec3 groundColor = glm::vec3(0.22f, 0.20f, 0.18f);
+    float u = 0.5f + atan2f(d.z, d.x) / (2.0f * PI);
+    float v = acosf(fminf(fmaxf(d.y, -1.0f), 1.0f)) / PI;
 
-    float skyT = glm::clamp(d.y, 0.0f, 1.0f);
-    glm::vec3 skyColor = glm::mix(horizonColor, zenithColor, skyT);
-    glm::vec3 envColor = d.y >= 0.0f ? skyColor : groundColor;
-
-    glm::vec3 sunDir = glm::normalize(glm::vec3(-0.35f, 0.85f, 0.25f));
-    float sunAmount = powf(fmaxf(glm::dot(d, sunDir), 0.0f), 1024.0f);
-    glm::vec3 sunColor = glm::vec3(18.0f, 14.0f, 9.0f) * sunAmount;
-
-    return envColor + sunColor;
+    glm::vec4 sample =
+        sample_texture(textures, environmentMapTexId + 1, environmentMapTexId,
+                       glm::vec2(u, v));
+    return glm::vec3(sample);
 }
 
 __global__ void computeIntersections(int depth, int num_paths,
@@ -462,6 +472,9 @@ __global__ void computeIntersections(int depth, int num_paths,
                                      int triangles_size,
                                      ShadeableIntersection *intersections,
                                      PathSegment *orderedPathSegments, BVHNode *bvh,
+                                     Material *materials,
+                                     DeviceTexture *textures,
+                                     int environmentMapTexId,
                                      glm::vec3 *dev_albedo, glm::vec3 *dev_normal) {
   int path_index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -560,7 +573,10 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].surfaceTangent = glm::vec3(0.0f);
         intersections[path_index].tangentSign = 1.0f;
         intersections[path_index].outside = 1;
-        pathSegment.radiance += pathSegment.throughput * environmentColor(pathSegment.ray.direction);
+        pathSegment.radiance +=
+            pathSegment.throughput *
+            environmentColor(pathSegment.ray.direction, textures,
+                             environmentMapTexId);
         pathSegment.remainingBounces = 0;
         if (orderedPathSegments != NULL) {
           orderedPathSegments[pathSegment.pixelIndex] = pathSegment;
@@ -582,6 +598,14 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].uv = hit_uv;
         intersections[path_index].outside = hit_outside ? 1 : 0;
 
+        if (pathSegment.mediumMaterialIndex >= 0) {
+            const Material &medium = materials[pathSegment.mediumMaterialIndex];
+
+            glm::vec3 Tr = get_volume_transmittance(
+                medium.attenuationColor, medium.attenuationDistance, t_min);
+
+            pathSegment.throughput *= Tr;
+        }
       }
     }
   }
@@ -615,7 +639,8 @@ __device__ glm::vec4 sample_texture(DeviceTexture *textures, int textures_size,
   }
 
   DeviceTexture texture = textures[textureId];
-  if (texture.pixels == NULL || texture.width <= 0 || texture.height <= 0) {
+  if ((texture.pixels == NULL && texture.hdrPixels == NULL) ||
+      texture.width <= 0 || texture.height <= 0) {
     return glm::vec4(1.0f);
   }
 
@@ -631,19 +656,31 @@ __device__ glm::vec4 sample_texture(DeviceTexture *textures, int textures_size,
   float tx = x - (float)x0;
   float ty = y - (float)y0;
 
-  uchar4 c00 = texture.pixels[y0 * texture.width + x0];
-  uchar4 c10 = texture.pixels[y0 * texture.width + x1];
-  uchar4 c01 = texture.pixels[y1 * texture.width + x0];
-  uchar4 c11 = texture.pixels[y1 * texture.width + x1];
+  glm::vec4 p00;
+  glm::vec4 p10;
+  glm::vec4 p01;
+  glm::vec4 p11;
 
-  glm::vec4 p00(c00.x, c00.y, c00.z, c00.w);
-  glm::vec4 p10(c10.x, c10.y, c10.z, c10.w);
-  glm::vec4 p01(c01.x, c01.y, c01.z, c01.w);
-  glm::vec4 p11(c11.x, c11.y, c11.z, c11.w);
+  if (texture.isHdr && texture.hdrPixels != NULL) {
+    p00 = texture.hdrPixels[y0 * texture.width + x0];
+    p10 = texture.hdrPixels[y0 * texture.width + x1];
+    p01 = texture.hdrPixels[y1 * texture.width + x0];
+    p11 = texture.hdrPixels[y1 * texture.width + x1];
+  } else {
+    uchar4 c00 = texture.pixels[y0 * texture.width + x0];
+    uchar4 c10 = texture.pixels[y0 * texture.width + x1];
+    uchar4 c01 = texture.pixels[y1 * texture.width + x0];
+    uchar4 c11 = texture.pixels[y1 * texture.width + x1];
+
+    p00 = glm::vec4(c00.x, c00.y, c00.z, c00.w) / 255.0f;
+    p10 = glm::vec4(c10.x, c10.y, c10.z, c10.w) / 255.0f;
+    p01 = glm::vec4(c01.x, c01.y, c01.z, c01.w) / 255.0f;
+    p11 = glm::vec4(c11.x, c11.y, c11.z, c11.w) / 255.0f;
+  }
 
   glm::vec4 top = glm::mix(p00, p10, tx);
   glm::vec4 bottom = glm::mix(p01, p11, tx);
-  return glm::mix(top, bottom, ty) / 255.0f;
+  return glm::mix(top, bottom, ty);
 }
 
 __device__ glm::vec3 tangentFromNormal(glm::vec3 normal) {
@@ -804,7 +841,7 @@ __global__ void computeRayColors(int iter, int depth, int num_paths,
                                intersection.outside != 0, sampledMaterial,
                                lights, lights_size, geoms, geoms_size,
                                triangles, triangles_size, bvh, materials,
-                               materials_size, rng);
+                               materials_size, intersection.materialId, rng);
                 segment->radiance += segment->throughput * scatter.contribution;
                 segment->throughput *= scatter.throughputMultiplier;
                 segment->etaScale *= scatter.etaScale;
@@ -975,6 +1012,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         depth, n, dev_active_paths, dev_geoms, hst_scene->geoms.size(),
         dev_triangles, hst_scene->triangles.size(),
         dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths, dev_bvh,
+        dev_materials, dev_textures, hst_scene->environmentMapTexId,
         dev_albedo, dev_normal);
     checkCUDAError("trace one bounce");
     // cudaDeviceSynchronize();

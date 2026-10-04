@@ -20,6 +20,7 @@ public:
     std::vector<Material> materials;
     std::vector<Texture> textures;
     std::vector<SceneLight> lights;
+    int environmentMapTexId = -1;
     BVH bvh;
     RenderState state;
 };
