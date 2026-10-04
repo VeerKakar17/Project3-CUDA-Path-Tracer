@@ -25,6 +25,7 @@
 static constexpr bool SORT_BY_MATERIAL = true;
 static constexpr bool TOGGLE_ENVIRONMENT = false;
 static constexpr bool USE_BVH_TREE = true;
+static constexpr bool USE_OIDN_AOVS = false;
 
 #define FILENAME                                                               \
   (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -119,8 +120,8 @@ static thrust::device_ptr<ShadeableIntersection> dev_thrust_intersections_tmp =
 static std::vector<DeviceTexture> hst_device_textures;
 static glm::vec3 *dev_beauty = NULL;
 static glm::vec3 *dev_denoised = NULL;
-static float *dev_albedo = NULL;
-static float *dev_normal = NULL;
+static glm::vec3 *dev_albedo = NULL;
+static glm::vec3 *dev_normal = NULL;
 static oidn::DeviceRef oidnDevice;
 static oidn::FilterRef oidnFilter;
 static cudaStream_t oidnStream = 0;
@@ -228,8 +229,8 @@ void pathtraceInit(Scene *scene) {
 
   cudaMalloc(&dev_beauty, pixelcount * sizeof(glm::vec3));
   cudaMalloc(&dev_denoised, pixelcount * sizeof(glm::vec3));
-  cudaMalloc(&dev_albedo, pixelcount * sizeof(float));
-  cudaMalloc(&dev_normal, pixelcount * sizeof(float));
+  cudaMalloc(&dev_albedo, pixelcount * sizeof(glm::vec3));
+  cudaMalloc(&dev_normal, pixelcount * sizeof(glm::vec3));
 
   checkCUDAError("pathtraceInit");
 }
@@ -456,7 +457,8 @@ __global__ void computeIntersections(int depth, int num_paths,
                                      int geoms_size, Triangle *triangles,
                                      int triangles_size,
                                      ShadeableIntersection *intersections,
-                                     PathSegment *orderedPathSegments, BVHNode *bvh) {
+                                     PathSegment *orderedPathSegments, BVHNode *bvh,
+                                     glm::vec3 *dev_albedo, glm::vec3 *dev_normal) {
   int path_index = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (path_index < num_paths) {
@@ -545,6 +547,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         }
       }
 
+      int pixel_index = pathSegment.pixelIndex;
       if (hit_material_id == -1) {
         intersections[path_index].t = -1.0f;
         intersections[path_index].geomId = -1;
@@ -558,6 +561,11 @@ __global__ void computeIntersections(int depth, int num_paths,
         if (orderedPathSegments != NULL) {
           orderedPathSegments[pathSegment.pixelIndex] = pathSegment;
         }
+
+        if (depth == 0) {
+            dev_normal[pixel_index] = glm::vec3(0.0f);
+            dev_albedo[pixel_index] = glm::vec3(0.0f);
+        }
       } else {
         // The ray hits something
         intersections[path_index].t = t_min;
@@ -569,6 +577,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         intersections[path_index].tangentSign = hit_tangent_sign;
         intersections[path_index].uv = hit_uv;
         intersections[path_index].outside = hit_outside ? 1 : 0;
+
       }
     }
   }
@@ -664,7 +673,7 @@ __device__ glm::vec3 apply_normal_texture(DeviceTexture *textures,
                         sampled.z * normal);
 }
 
-__global__ void computeRayColors(int iter, int num_paths,
+__global__ void computeRayColors(int iter, int depth, int num_paths,
                                  ShadeableIntersection *shadeableIntersections,
                                  PathSegment *pathSegments,
                                  Geom *geoms,
@@ -678,7 +687,9 @@ __global__ void computeRayColors(int iter, int num_paths,
                                  int textures_size,
                                  SceneLight *lights,
                                  int lights_size,
-                                 PathSegment *orderedPathSegments) {
+                                 PathSegment *orderedPathSegments,
+                                 glm::vec3 *dev_albedo,
+                                 glm::vec3 *dev_normal) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_paths) {
       ShadeableIntersection intersection = shadeableIntersections[idx];
@@ -725,6 +736,10 @@ __global__ void computeRayColors(int iter, int num_paths,
             glm::vec3 surfaceNormal =
                 apply_normal_texture(textures, textures_size, sampledMaterial,
                                      intersection);
+            if (depth == 1) {
+                dev_albedo[segment->pixelIndex] = sampledMaterial.color;
+                dev_normal[segment->pixelIndex] = surfaceNormal;
+            }
 
             glm::vec3 old_dir = -segment->ray.direction;
             glm::vec3 intersect_point = getPointOnRay(segment->ray, intersection.t);
@@ -937,7 +952,8 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>>(
         depth, n, dev_active_paths, dev_geoms, hst_scene->geoms.size(),
         dev_triangles, hst_scene->triangles.size(),
-        dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths, dev_bvh);
+        dev_active_intersections, SORT_BY_MATERIAL ? NULL : dev_paths, dev_bvh,
+        dev_albedo, dev_normal);
     checkCUDAError("trace one bounce");
     // cudaDeviceSynchronize();
     depth++;
@@ -1001,11 +1017,11 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         (n + blockSize1d - 1) / blockSize1d;
 
     computeRayColors<<<numblocksPathSegmentTracing, blockSize1d>>>(
-        iter, n, dev_active_intersections, dev_active_paths, dev_geoms,
+        iter, depth, n, dev_active_intersections, dev_active_paths, dev_geoms,
         hst_scene->geoms.size(), dev_triangles, hst_scene->triangles.size(),
         dev_materials, hst_scene->materials.size(), dev_bvh, dev_textures,
         hst_scene->textures.size(), dev_lights, hst_scene->lights.size(),
-        SORT_BY_MATERIAL ? NULL : dev_paths);
+        SORT_BY_MATERIAL ? NULL : dev_paths, dev_albedo, dev_normal);
 
     if (guiData != NULL) {
       guiData->TracedDepth = depth;
@@ -1047,6 +1063,13 @@ void oidn_denoise(Scene *scene, int iter) {
     oidnFilter = oidnDevice.newFilter("RT");
     oidnFilter.setImage("color", dev_beauty, oidn::Format::Float3,
                         cam.resolution.x, cam.resolution.y);
+    if (USE_OIDN_AOVS) {
+        oidnFilter.setImage("albedo", dev_albedo, oidn::Format::Float3,
+                            cam.resolution.x, cam.resolution.y);
+        oidnFilter.setImage("normal", dev_normal, oidn::Format::Float3,
+                            cam.resolution.x, cam.resolution.y);
+        oidnFilter.set("cleanAux", true);
+    }
     oidnFilter.setImage("output", dev_denoised, oidn::Format::Float3,
                         cam.resolution.x, cam.resolution.y);
     oidnFilter.set("hdr", true);
@@ -1058,7 +1081,4 @@ void oidn_denoise(Scene *scene, int iter) {
         fprintf(stderr, "OIDN error: %s\n", errorMessage);
 
     cudaMemcpy(scene->state.image.data(), dev_denoised, pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
-    for (glm::vec3 &pixel : scene->state.image) {
-        pixel *= (float)iter;
-    }
 }

@@ -24,6 +24,8 @@
 #include <sstream>
 #include <string>
 
+static constexpr bool USE_DENOISER = true;
+
 static std::string startTimeString;
 
 // For camera controls
@@ -404,7 +406,12 @@ void saveImage()
         {
             int index = x + (y * width);
             glm::vec3 pix = renderState->image[index];
-            img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+
+            if (USE_DENOISER) {
+                img.setPixel(width - 1 - x, y, glm::vec3(pix));
+            } else {
+                img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            }
         }
     }
 
@@ -465,7 +472,9 @@ void runCuda()
     }
     else
     {
-        oidn_denoise(scene, iteration);
+        if (USE_DENOISER) {
+            oidn_denoise(scene, iteration);
+        }
         saveImage();
         pathtraceFree();
         cudaDeviceReset();
