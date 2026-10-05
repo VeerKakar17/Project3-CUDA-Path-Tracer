@@ -51,18 +51,6 @@ struct ScatterResult
     bool wasTransmission;
 };
 
-__device__ glm::vec3 evaluateEmissiveHit(
-    const PathSegment& pathSegment,
-    glm::vec3 hitPoint,
-    glm::vec3 lightNormal,
-    int triangleId,
-    const Material& lightMaterial,
-    SceneLight* lights,
-    int lights_size,
-    Triangle* triangles,
-    int triangles_size,
-    float totalLightArea);
-
 __device__ ScatterResult scatterRay(
     PathSegment& pathSegment,
     glm::vec3 intersect,
@@ -81,7 +69,3 @@ __device__ ScatterResult scatterRay(
     int materialId,
     float totalLightArea,
     thrust::default_random_engine& rng);
-
-__device__ glm::vec3 get_volume_transmittance(const glm::vec3& attenuationColor,
-                                              float attenuationDistance,
-                                              float distance);

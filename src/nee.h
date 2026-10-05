@@ -1,11 +1,37 @@
 #pragma once
 
+#include "bvh.h"
 #include "sceneStructs.h"
 
 #include <thrust/random.h>
 
 namespace Nee
 {
+__device__ float power_heuristic(float pdfA, float pdfB);
+
+__device__ bool shadow_ray_visible(
+    const glm::vec3& origin,
+    const NeeSample& neeSample,
+    Geom* geoms,
+    int geoms_size,
+    Triangle* triangles,
+    int triangles_size,
+    BVHNode* bvh,
+    Material* materials,
+    int materials_size);
+
+__device__ glm::vec3 evaluate_emissive_hit(
+    const PathSegment& pathSegment,
+    glm::vec3 hitPoint,
+    glm::vec3 lightNormal,
+    int triangleId,
+    const Material& lightMaterial,
+    SceneLight* lights,
+    int lights_size,
+    Triangle* triangles,
+    int triangles_size,
+    float totalLightArea);
+
 __device__ LightSample sample_light(
     SceneLight* lights,
     int lights_size,

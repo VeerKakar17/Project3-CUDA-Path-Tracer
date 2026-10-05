@@ -15,8 +15,10 @@
 
 #include "glm/glm.hpp"
 #include "glm/gtx/norm.hpp"
+#include "dielectric.h"
 #include "interactions.h"
 #include "intersections.h"
+#include "nee.h"
 #include "scene.h"
 #include "sceneStructs.h"
 #include "utilities.h"
@@ -601,7 +603,7 @@ __global__ void computeIntersections(int depth, int num_paths,
         if (pathSegment.mediumMaterialIndex >= 0) {
             const Material &medium = materials[pathSegment.mediumMaterialIndex];
 
-            glm::vec3 Tr = get_volume_transmittance(
+            glm::vec3 Tr = Dielectric::get_volume_transmittance(
                 medium.attenuationColor, medium.attenuationDistance, t_min);
 
             pathSegment.throughput *= Tr;
@@ -830,7 +832,7 @@ __global__ void computeRayColors(int iter, int depth, int num_paths,
             }
 
             if (sampledMaterial.is_emissive) {
-                glm::vec3 emissionContribution = evaluateEmissiveHit(
+                glm::vec3 emissionContribution = Nee::evaluate_emissive_hit(
                     *segment, intersect_point, surfaceNormal,
                     intersection.triangleId, sampledMaterial, lights,
                     lights_size, triangles, triangles_size, totalLightArea);

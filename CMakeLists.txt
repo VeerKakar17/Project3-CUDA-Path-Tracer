@@ -61,6 +61,7 @@ include_directories(${GLM_INCLUDE_DIRS})
 
 set(headers
     src/bvh.h
+    src/dielectric.h
     src/image.h
     src/interactions.h
     src/intersections.h
@@ -82,6 +83,7 @@ set(sources
     src/pathtrace.cu
     src/intersections.cu
     src/interactions.cu
+    src/dielectric.cu
     src/microfacet.cu
     src/nee.cu
     src/scene.cpp

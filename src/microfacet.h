@@ -4,6 +4,14 @@
 
 namespace Microfacet
 {
+__device__ float material_alpha(const Material& material);
+
+__device__ void material_lobe_weights(
+    const Material& material,
+    float& wDiffuse,
+    float& wMetal,
+    float& wTransmission);
+
 __host__ __device__ glm::vec3 sample_wm(float alpha, const glm::vec2& u);
 
 __host__ __device__ glm::vec3 sample_wm(
@@ -17,6 +25,15 @@ __host__ __device__ ScatterResult get_brdf_result(
     glm::vec3 normal,
     const Material& material,
     float alpha,
+    const glm::vec3& sampledWm,
+    thrust::default_random_engine& rng);
+
+__device__ ScatterResult calculate_reflection(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    const Material& material,
+    bool pureDeltaMetal,
     const glm::vec3& sampledWm,
     thrust::default_random_engine& rng);
 

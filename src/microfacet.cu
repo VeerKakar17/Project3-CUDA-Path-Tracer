@@ -4,8 +4,27 @@
 
 #include <thrust/random.h>
 
+#define REMAP_ROUGHNESS 1
+
 namespace Microfacet
 {
+
+__device__ float material_alpha(const Material& m) {
+    float alpha = fminf(fmaxf(m.roughness_factor, 0.001f), 1.0f);
+#if REMAP_ROUGHNESS
+    alpha = alpha * alpha;
+#endif
+    return alpha;
+}
+
+__device__ void material_lobe_weights(const Material& m,
+                                      float& wDiffuse,
+                                      float& wMetal,
+                                      float& wTransmission) {
+    wMetal = m.metalic_factor;
+    wTransmission = (1.0f - wMetal) * m.transmission_factor;
+    wDiffuse = (1.0f - wMetal) * (1.0f - m.transmission_factor);
+}
 
 __host__ __device__ float abs_cos_theta(const glm::vec3 &w) {
     return fabsf(w.z);
@@ -269,6 +288,38 @@ __host__ __device__ ScatterResult get_brdf_result(
         result.throughputMultiplier = brdf * cosThetaI / pdf;
         result.pdf = pdf;
         return result;
+}
+
+__device__ ScatterResult calculate_reflection(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    const Material& m,
+    bool pureDeltaMetal,
+    const glm::vec3& sampledWm,
+    thrust::default_random_engine& rng)
+{
+    ScatterResult result;
+    result.throughputMultiplier = glm::vec3(0.0f);
+    result.contribution = glm::vec3(0.0f);
+    result.etaScale = 1.0f;
+    result.pdf = 0.0f;
+    result.wasSpecular = false;
+    result.wasTransmission = false;
+
+    if (pureDeltaMetal) {
+        pathSegment.ray.direction =
+            glm::reflect(pathSegment.ray.direction, normal);
+        pathSegment.ray.origin = intersect;
+        result.throughputMultiplier = m.color;
+        result.pdf = 1.0f;
+        result.wasSpecular = true;
+        return result;
+    }
+
+    float alpha = m.roughness_factor * m.roughness_factor;
+    return get_brdf_result(pathSegment, intersect, normal, m, alpha, sampledWm,
+                           rng);
 }
 
 __host__ __device__ ScatterResult get_brdf_result(
