@@ -119,6 +119,7 @@ struct SceneLight
 {
     uint8_t type;
     int id;
+    float area;
 };
 
 struct LightSample

@@ -16,12 +16,15 @@ project, and we will not be able to grade you without a good README.
 - Stream compaction and material sorting optimization
 - Reflective, metallic, alpha, and emissive materials
 - glTF mesh loading with transforms, materials, textures, normal maps, and sRGB decode
+    - Can composite with existing JSON scene format
+- Alpha mask/blend material handling
 - BVH acceleration for triangle meshes
 - Microfacet GGX rough/smooth metals
 - Smooth and rough dielectric glass with IOR/transmission
 - Mixed diffuse/metallic/transmissive materials
 - Next-event estimation, shadow rays, and MIS for emissive geometry
+    - Area weighted sampling for emissive triangles NEE
 - HDR Environment Map with Lighting
 - OIDN GPU denoiser using beauty, albedo, and normal buffers
-- Russian Roulette
-- Volumetric dielectrics
+- Russian Roulette with etaScale for dielectric paths
+- Tinted absorbtion for volumetric dielectrics

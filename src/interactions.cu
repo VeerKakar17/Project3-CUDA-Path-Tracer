@@ -321,14 +321,16 @@ __device__ glm::vec3 evaluateEmissiveHit(
     SceneLight* lights,
     int lights_size,
     Triangle* triangles,
-    int triangles_size) {
+    int triangles_size,
+    float totalLightArea) {
     float misWeight = 1.0f;
     if (!pathSegment.lastBounceWasSpecular &&
         pathSegment.lastBsdfPdf > 0.0f &&
         triangleId >= 0) {
         float lightPdf = Nee::pdf_light_for_triangle_hit(
             pathSegment.ray.origin, hitPoint, lightNormal, triangleId, lights,
-            lights_size, triangles, triangles_size, lightMaterial);
+            lights_size, triangles, triangles_size, lightMaterial,
+            totalLightArea);
         misWeight = power_heuristic(pathSegment.lastBsdfPdf, lightPdf);
     }
 
@@ -495,8 +497,10 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
                                     Material *materials,
                                     int materials_size,
                                     int materialId,
+                                    float totalLightArea,
                                     thrust::default_random_engine &rng) {
     const float materialEpsilon = 0.001f;
+    (void)totalLightArea;
     
     ScatterResult result = empty_scatter_result();
 
@@ -534,7 +538,8 @@ __device__ ScatterResult scatterRay(PathSegment &pathSegment,
     if (doMIS) {
         NeeSample neeSample =
         Nee::get_nee(intersect, normal, lights, lights_size, triangles,
-                         triangles_size, materials, materials_size, rng);
+                         triangles_size, materials, materials_size,
+                         totalLightArea, rng);
         if (neeSample.valid &&
             shadow_ray_visible(intersect, neeSample, geoms, geoms_size,
                                triangles, triangles_size, bvh, materials,

@@ -6,6 +6,7 @@ namespace Nee
 __device__ LightSample sample_light(
     SceneLight* lights,
     int lights_size,
+    float totalLightArea,
     thrust::default_random_engine& rng)
 {
     LightSample sample{};
@@ -13,42 +14,32 @@ __device__ LightSample sample_light(
     sample.lightPickPdf = 0.0f;
     sample.valid = false;
 
-    if (lights == nullptr || lights_size <= 0)
+    if (lights == nullptr || lights_size <= 0 || totalLightArea <= 0.0f)
     {
         return sample;
     }
 
-    int triangleLightCount = 0;
-    for (int i = 0; i < lights_size; ++i)
-    {
-        if (lights[i].type == SCENE_LIGHT_TRIANGLE)
-        {
-            ++triangleLightCount;
-        }
-    }
-    if (triangleLightCount == 0)
-    {
-        return sample;
-    }
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    float targetArea = u01(rng) * totalLightArea;
 
-    thrust::uniform_int_distribution<int> pickLight(0, triangleLightCount - 1);
-    int selectedTriangleLight = pickLight(rng);
-    int seenTriangleLights = 0;
-    for (int i = 0; i < lights_size; ++i)
+    float accumulatedArea = 0.0f;
+    for (int i = 0; i < lights_size; i++)
     {
-        if (lights[i].type != SCENE_LIGHT_TRIANGLE)
+        if (lights[i].type != SCENE_LIGHT_TRIANGLE || lights[i].area <= 0.0f)
         {
             continue;
         }
-        if (seenTriangleLights == selectedTriangleLight)
+
+        accumulatedArea += lights[i].area;
+
+        if (accumulatedArea >= targetArea)
         {
             sample.light = lights[i];
             sample.lightIndex = i;
-            sample.lightPickPdf = 1.0f / (float)triangleLightCount;
+            sample.lightPickPdf = lights[i].area / totalLightArea;
             sample.valid = true;
             return sample;
         }
-        ++seenTriangleLights;
     }
 
     return sample;
@@ -100,7 +91,7 @@ __device__ LightPointSample sample_point_from_light(
     sample.normal = glm::normalize(sample.normal);
     sample.barycentric = glm::vec3(b0, b1, b2);
     sample.materialId = triangle.materialid;
-    sample.pdfArea = 2.0f / normalLength;
+    sample.pdfArea = 1.0f / lightSample.light.area;
     sample.valid = true;
     return sample;
 }
@@ -114,6 +105,7 @@ __device__ NeeSample get_nee(
     int triangles_size,
     Material* materials,
     int materials_size,
+    float totalLightArea,
     thrust::default_random_engine& rng)
 {
     NeeSample result{};
@@ -125,7 +117,8 @@ __device__ NeeSample get_nee(
     result.materialId = -1;
     result.valid = false;
 
-    LightSample lightSample = sample_light(lights, lights_size, rng);
+    LightSample lightSample =
+        sample_light(lights, lights_size, totalLightArea, rng);
     LightPointSample pointSample =
         sample_point_from_light(lightSample, triangles, triangles_size, rng);
     if (!lightSample.valid || !pointSample.valid ||
@@ -190,38 +183,30 @@ __device__ float pdf_light_for_triangle_hit(
     int lights_size,
     Triangle* triangles,
     int triangles_size,
-    const Material& lightMaterial)
+    const Material& lightMaterial,
+    float totalLightArea)
 {
     if (triangleId < 0 || triangleId >= triangles_size ||
-        triangles == nullptr || lights == nullptr || lights_size <= 0)
+        triangles == nullptr || lights == nullptr || lights_size <= 0 ||
+        totalLightArea <= 0.0f)
     {
         return 0.0f;
     }
 
-    int triangleLightCount = 0;
-    bool selectedTriangleIsLight = false;
+    SceneLight matchedLight{};
+    bool foundLight = false;
     for (int i = 0; i < lights_size; ++i)
     {
-        if (lights[i].type != SCENE_LIGHT_TRIANGLE)
+        if (lights[i].type != SCENE_LIGHT_TRIANGLE ||
+            lights[i].id != triangleId)
         {
             continue;
         }
-        ++triangleLightCount;
-        if (lights[i].id == triangleId)
-        {
-            selectedTriangleIsLight = true;
-        }
+        matchedLight = lights[i];
+        foundLight = true;
+        break;
     }
-    if (!selectedTriangleIsLight || triangleLightCount == 0)
-    {
-        return 0.0f;
-    }
-
-    const Triangle& triangle = triangles[triangleId];
-    glm::vec3 edge1 = triangle.v1 - triangle.v0;
-    glm::vec3 edge2 = triangle.v2 - triangle.v0;
-    float normalLength = glm::length(glm::cross(edge1, edge2));
-    if (normalLength <= 0.0f)
+    if (!foundLight || matchedLight.area <= 0.0f)
     {
         return 0.0f;
     }
@@ -242,9 +227,9 @@ __device__ float pdf_light_for_triangle_hit(
         return 0.0f;
     }
 
-    float pdfArea = 2.0f / normalLength;
+    float pdfArea = 1.0f / matchedLight.area;
     float pdfDirectional = pdfArea * distanceSquared / cosLight;
-    float lightPickPdf = 1.0f / (float)triangleLightCount;
+    float lightPickPdf = matchedLight.area / totalLightArea;
     return lightPickPdf * pdfDirectional;
 }
 

@@ -60,7 +60,8 @@ __device__ glm::vec3 evaluateEmissiveHit(
     SceneLight* lights,
     int lights_size,
     Triangle* triangles,
-    int triangles_size);
+    int triangles_size,
+    float totalLightArea);
 
 __device__ ScatterResult scatterRay(
     PathSegment& pathSegment,
@@ -78,6 +79,7 @@ __device__ ScatterResult scatterRay(
     Material* materials,
     int materials_size,
     int materialId,
+    float totalLightArea,
     thrust::default_random_engine& rng);
 
 __device__ glm::vec3 get_volume_transmittance(const glm::vec3& attenuationColor,

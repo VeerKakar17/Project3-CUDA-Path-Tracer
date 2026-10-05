@@ -196,6 +196,7 @@ static void finalizeCamera(RenderState& state, float fovy)
 void Scene::buildLightList()
 {
     lights.clear();
+    totalLightArea = 0.0f;
 
     for (size_t i = 0; i < triangles.size(); ++i)
     {
@@ -224,7 +225,9 @@ void Scene::buildLightList()
         SceneLight light{};
         light.type = SCENE_LIGHT_TRIANGLE;
         light.id = (int)i;
+        light.area = 0.5f * normalLength;
         lights.push_back(light);
+        totalLightArea += light.area;
     }
 
     for (size_t i = 0; i < geoms.size(); ++i)
@@ -244,6 +247,7 @@ void Scene::buildLightList()
         SceneLight light{};
         light.type = SCENE_LIGHT_GEOM;
         light.id = (int)i;
+        light.area = 0.0f;
         lights.push_back(light);
     }
 }

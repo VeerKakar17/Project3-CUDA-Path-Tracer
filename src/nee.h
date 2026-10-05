@@ -9,6 +9,7 @@ namespace Nee
 __device__ LightSample sample_light(
     SceneLight* lights,
     int lights_size,
+    float totalLightArea,
     thrust::default_random_engine& rng);
 
 __device__ LightPointSample sample_point_from_light(
@@ -26,6 +27,7 @@ __device__ NeeSample get_nee(
     int triangles_size,
     Material* materials,
     int materials_size,
+    float totalLightArea,
     thrust::default_random_engine& rng);
 
 __device__ float pdf_light_for_triangle_hit(
@@ -37,5 +39,6 @@ __device__ float pdf_light_for_triangle_hit(
     int lights_size,
     Triangle* triangles,
     int triangles_size,
-    const Material& lightMaterial);
+    const Material& lightMaterial,
+    float totalLightArea);
 }

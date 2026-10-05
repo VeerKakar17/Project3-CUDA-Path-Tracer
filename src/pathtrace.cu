@@ -732,6 +732,7 @@ __global__ void computeRayColors(int iter, int depth, int num_paths,
                                  int textures_size,
                                  SceneLight *lights,
                                  int lights_size,
+                                 float totalLightArea,
                                  PathSegment *orderedPathSegments,
                                  glm::vec3 *dev_albedo,
                                  glm::vec3 *dev_normal) {
@@ -832,7 +833,7 @@ __global__ void computeRayColors(int iter, int depth, int num_paths,
                 glm::vec3 emissionContribution = evaluateEmissiveHit(
                     *segment, intersect_point, surfaceNormal,
                     intersection.triangleId, sampledMaterial, lights,
-                    lights_size, triangles, triangles_size);
+                    lights_size, triangles, triangles_size, totalLightArea);
                 segment->radiance += segment->throughput * emissionContribution;
                 segment->remainingBounces = 0;
             } else {
@@ -841,7 +842,8 @@ __global__ void computeRayColors(int iter, int depth, int num_paths,
                                intersection.outside != 0, sampledMaterial,
                                lights, lights_size, geoms, geoms_size,
                                triangles, triangles_size, bvh, materials,
-                               materials_size, intersection.materialId, rng);
+                               materials_size, intersection.materialId,
+                               totalLightArea, rng);
                 segment->radiance += segment->throughput * scatter.contribution;
                 segment->throughput *= scatter.throughputMultiplier;
                 segment->etaScale *= scatter.etaScale;
@@ -1081,7 +1083,8 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
         hst_scene->geoms.size(), dev_triangles, hst_scene->triangles.size(),
         dev_materials, hst_scene->materials.size(), dev_bvh, dev_textures,
         hst_scene->textures.size(), dev_lights, hst_scene->lights.size(),
-        SORT_BY_MATERIAL ? NULL : dev_paths, dev_albedo, dev_normal);
+        hst_scene->totalLightArea, SORT_BY_MATERIAL ? NULL : dev_paths,
+        dev_albedo, dev_normal);
 
     if (guiData != NULL) {
       guiData->TracedDepth = depth;
