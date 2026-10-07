@@ -150,9 +150,6 @@
       "uri": "scene.bin"
     }
   ],
-  "extensionsUsed": [
-    "KHR_materials_unlit"
-  ],
   "images": [
     {
       "uri": "textures/material0000_baseColor.jpeg"
@@ -161,25 +158,35 @@
   "materials": [
     {
       "extensions": {
-        "KHR_materials_unlit": {},
         "KHR_materials_transmission": {
           "transmissionFactor": 1.0
         },
         "KHR_materials_ior": {
-          "ior": 1.33
+          "ior": 1.47
         },
         "KHR_materials_volume": {
-          "thicknessFactor": 1.0,
-          "attenuationDistance": 5,
-          "attenuationColor": [0.85, 0.95, 0.98]
+          "thicknessFactor": 0.16,
+          "attenuationDistance": 8.5,
+          "attenuationColor": [
+            1.0,
+            0.88,
+            0.945
+          ]
         }
       },
       "name": "material0000",
       "pbrMetallicRoughness": {
-        "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
-        "roughnessFactor": 0.02,
+        "baseColorFactor": [
+          1.0,
+          0.955,
+          0.978,
+          1.0
+        ],
+        "roughnessFactor": 0.0,
         "metallicFactor": 0.0
-      }
+      },
+      "doubleSided": true,
+      "alphaMode": "OPAQUE"
     }
   ],
   "meshes": [
